@@ -7,18 +7,22 @@
 </head>
 <body>
   <div class="bar">
+    <div id="status" class="status" data-state="connecting" title="세션 상태">
+      <span class="status-dot"></span>
+      <span id="status-text">연결 중</span>
+    </div>
     <div id="find">
-      <input id="find-input" type="text" spellcheck="false" autocomplete="off" placeholder="결과 검색" aria-label="결과 검색" />
+      <input id="find-input" type="text" spellcheck="false" autocomplete="off" placeholder="결과 검색 (Ctrl+F)" aria-label="결과 검색" />
       <button id="find-case" type="button" class="find-opt" title="대/소문자 구분 (Alt+C)" aria-label="대/소문자 구분" aria-pressed="false">Aa</button>
       <button id="find-word" type="button" class="find-opt" title="단어 단위로 (Alt+W)" aria-label="단어 단위로" aria-pressed="false">ab</button>
       <button id="find-regex" type="button" class="find-opt" title="정규식 사용 (Alt+R)" aria-label="정규식 사용" aria-pressed="false">.*</button>
       <span id="find-count"></span>
-      <button id="find-prev" type="button" title="이전" aria-label="이전" disabled>
+      <button id="find-prev" type="button" title="이전 (Shift+Enter)" aria-label="이전" disabled>
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <path fill="currentColor" d="M4.2 9.8 8 6.2 11.8 9.8 10.7 10.9 8 8.2 5.3 10.9z" />
         </svg>
       </button>
-      <button id="find-next" type="button" title="다음" aria-label="다음" disabled>
+      <button id="find-next" type="button" title="다음 (Enter)" aria-label="다음" disabled>
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <path fill="currentColor" d="M4.2 6.2 8 9.8 11.8 6.2 10.7 5.1 8 7.8 5.3 5.1z" />
         </svg>
@@ -29,10 +33,34 @@
   </div>
   <div id="stage">
     <div id="history"></div>
+    <div id="empty" aria-hidden="true">
+      <div class="empty-card">
+        <svg class="empty-icon" viewBox="0 0 24 24" width="32" height="32">
+          <path fill="currentColor" d="M3.5 5.2h2.4L11 12l-5.1 6.8H3.5L8.6 12 3.5 5.2zm8.3 11.1h8.7v2.2h-8.7v-2.2z" />
+        </svg>
+        <p class="empty-title">ENOVIA MQL 세션</p>
+        <div class="empty-keys">
+          <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 실행</span>
+          <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 명령 제안</span>
+          <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 포매팅</span>
+          <span><kbd>Ctrl</kbd>+<kbd>F</kbd> 결과 검색</span>
+        </div>
+      </div>
+    </div>
     <div id="rail">
       <div id="drawer-split" title="너비 조절"></div>
-      <button id="rail-help" type="button" title="help" aria-pressed="false">help</button>
-      <button id="rail-list" type="button" title="list" aria-pressed="false">list</button>
+      <button id="rail-help" type="button" title="MQL 도움말 (help)" aria-pressed="false">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path fill="currentColor" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.8A5.8 5.8 0 1 1 8 2.2a5.8 5.8 0 0 1 0 11.6zm-.7-3.3h1.4v1.4H7.3v-1.4zm.7-6.3c-1.4 0-2.4.9-2.4 2.2h1.3c0-.6.5-1.1 1.1-1.1.6 0 1.1.4 1.1 1 0 .5-.3.8-.8 1.1-.6.4-.9.9-.9 1.7v.3h1.3v-.2c0-.5.2-.8.8-1.1.6-.4 1-.9 1-1.8 0-1.2-1-2.1-2.5-2.1z" />
+        </svg>
+        <span>help</span>
+      </button>
+      <button id="rail-list" type="button" title="스키마 목록 (list)" aria-pressed="false">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path fill="currentColor" d="M2 3.5h2v2H2v-2zm3.5 0.3h8.5v1.4H5.5V3.8zM2 7h2v2H2V7zm3.5 0.3h8.5v1.4H5.5V7.3zM2 10.5h2v2H2v-2zm3.5 0.3h8.5v1.4H5.5v-1.4z" />
+        </svg>
+        <span>list</span>
+      </button>
     </div>
     <aside id="drawer" aria-hidden="true">
       <div id="drawer-pane">

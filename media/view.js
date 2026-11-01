@@ -1,5 +1,7 @@
 const vscode = acquireVsCodeApi();
 const history = document.getElementById('history');
+const statusNode = document.getElementById('status');
+const statusText = document.getElementById('status-text');
 const clearButton = document.getElementById('clear');
 const restartButton = document.getElementById('restart');
 const clearBar = document.querySelector('.bar');
@@ -141,6 +143,33 @@ function clearCommand() {
   savePrefs();
 }
 
+function syncStatus() {
+  const hasBlocks = history.querySelector('.block') !== null;
+  const hasNotices = history.querySelector('.notice') !== null;
+  const blockRunning = !command.disabled && clearButton.disabled && hasBlocks;
+  const busy = sideBusy || blockRunning;
+  for (const button of history.querySelectorAll('.block-rerun')) {
+    button.disabled = command.disabled || busy;
+  }
+  if (busy) {
+    statusNode.dataset.state = 'running';
+    statusText.textContent = '실행 중';
+    return;
+  }
+  if (!command.disabled) {
+    statusNode.dataset.state = 'ready';
+    statusText.textContent = '준비됨';
+    return;
+  }
+  if (hasNotices) {
+    statusNode.dataset.state = 'error';
+    statusText.textContent = '세션 확인';
+    return;
+  }
+  statusNode.dataset.state = 'connecting';
+  statusText.textContent = '연결 중';
+}
+
 function setInputEnabled(enabled) {
   const wasEnabled = !command.disabled;
   command.disabled = !enabled;
@@ -151,6 +180,7 @@ function setInputEnabled(enabled) {
   syncCommandClear();
   syncJpoPath();
   syncDrawerControls();
+  syncStatus();
   if (!enabled) closeAssist();
   if (enabled && !wasEnabled) {
     const active = document.activeElement;
@@ -161,6 +191,7 @@ function setInputEnabled(enabled) {
 
 function setClearEnabled(enabled) {
   clearButton.disabled = !enabled;
+  syncStatus();
   if (enabled) fetchDrawerIfEmpty();
 }
 
@@ -301,11 +332,74 @@ function paintText(node, text) {
   paintSpans(node, text, findSpans(text, findQuery, findMatchCase, findWholeWord, findUseRegex));
 }
 
+function cleanResult(raw) {
+  if (!raw) return '';
+  const lines = raw.split(/\r\n|\n|\r/);
+  while (lines.length > 0 && (lines[lines.length - 1].trim() === '' || isPromptTail(lines[lines.length - 1]))) {
+    lines.pop();
+  }
+  const kept = [];
+  for (const line of lines) {
+    if (isPromptLine(line)) continue;
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1].trim() === '') kept.pop();
+  return kept.join('\n');
+}
+
+function hasErrorLine(text) {
+  return /(?:^|\n)\s*(?:Error:|System Error:|#\d+\s*:\s*Error)/i.test(text);
+}
+
+function paintResult(node, raw) {
+  const text = cleanResult(raw);
+  const block = node.closest('.block');
+  if (block) block.classList.toggle('error', hasErrorLine(text));
+  if (findQuery && !findBad) {
+    paintSpans(node, text, findSpans(text, findQuery, findMatchCase, findWholeWord, findUseRegex));
+    return;
+  }
+  if (!text) {
+    node.textContent = '';
+    return;
+  }
+  const lines = text.split('\n');
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < lines.length; i += 1) {
+    if (i > 0) frag.append(document.createTextNode('\n'));
+    const line = lines[i];
+    if (/^\s*(?:Error:|System Error:|#\d+\s*:\s*Error)/i.test(line)) {
+      const span = document.createElement('span');
+      span.className = 'res-err';
+      span.textContent = line;
+      frag.append(span);
+      continue;
+    }
+    if (/^\s*(?:Warning:|#\d+\s*:\s*Warning)/i.test(line)) {
+      const span = document.createElement('span');
+      span.className = 'res-warn';
+      span.textContent = line;
+      frag.append(span);
+      continue;
+    }
+    const kv = line.match(/^(\s*[A-Za-z0-9_.\-[\]]+\s*=\s*)(.+)$/);
+    if (kv) {
+      const keySpan = document.createElement('span');
+      keySpan.className = 'res-key';
+      keySpan.textContent = kv[1];
+      frag.append(keySpan, document.createTextNode(kv[2]));
+      continue;
+    }
+    frag.append(document.createTextNode(line));
+  }
+  node.replaceChildren(frag);
+}
+
 function paintBlock(item) {
   const text = blockText.get(item.dataset.id);
   if (!text) return;
   paintText(item.querySelector('.command'), text.command);
-  paintText(item.querySelector('.result'), text.result);
+  paintResult(item.querySelector('.result'), text.result);
 }
 
 function repaintBlocks() {
@@ -406,15 +500,34 @@ function blockNode(block) {
   fold.setAttribute('aria-label', label);
   fold.setAttribute('aria-expanded', folded ? 'false' : 'true');
   fold.append(foldIcon());
+  const badge = document.createElement('span');
+  badge.className = 'block-badge';
+  badge.textContent = `#${id}`;
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'command';
   paintText(button, commandText);
+  const actions = document.createElement('div');
+  actions.className = 'block-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'block-copy';
+  copyBtn.title = '결과 복사';
+  copyBtn.setAttribute('aria-label', '결과 복사');
+  copyBtn.append(recallIcon('M4 4v9h8V4H4zm1 1h6v7H5V5zm2-3h7v9h-1V3H7V2z'));
+  const rerunBtn = document.createElement('button');
+  rerunBtn.type = 'button';
+  rerunBtn.className = 'block-rerun';
+  rerunBtn.title = '다시 실행';
+  rerunBtn.setAttribute('aria-label', '다시 실행');
+  rerunBtn.disabled = command.disabled || sideBusy;
+  rerunBtn.append(recallIcon('M4.5 2.5v11l9-5.5z'));
+  actions.append(copyBtn, rerunBtn);
   const result = document.createElement('pre');
   result.className = 'result';
-  paintText(result, resultRaw);
-  head.append(fold, button);
+  head.append(fold, badge, button, actions);
   item.append(head, result);
+  paintResult(result, resultRaw);
   return item;
 }
 
@@ -1186,6 +1299,7 @@ function syncDrawerControls() {
   const locked = command.disabled || sideBusy;
   drawerRefresh.disabled = locked;
   listKind.disabled = locked;
+  syncStatus();
 }
 
 function syncHistory() {
@@ -1415,6 +1529,7 @@ window.addEventListener('message', (event) => {
   if (message.type === 'block') {
     history.append(blockNode(message));
     addRecall(message.id, message.command);
+    syncStatus();
     if (findQuery) syncFind(false);
     follow();
     return;
@@ -1425,12 +1540,8 @@ window.addEventListener('message', (event) => {
     const result = findResult(message.id);
     if (!result || !stored) return;
     stored.result += message.text;
-    if (findQuery) {
-      paintText(result, stored.result);
-      syncFind(false);
-    } else {
-      result.textContent += message.text;
-    }
+    paintResult(result, stored.result);
+    if (findQuery) syncFind(false);
     follow();
     return;
   }
@@ -1477,6 +1588,23 @@ history.addEventListener('click', (event) => {
     const block = fold.closest('.block');
     if (!block) return;
     setFolded(block, !block.classList.contains('collapsed'));
+    return;
+  }
+  const copyBtn = target.closest('.block-copy');
+  if (copyBtn) {
+    const block = copyBtn.closest('.block');
+    const stored = block ? blockText.get(block.dataset.id) : null;
+    if (!stored) return;
+    const text = cleanResult(stored.result) || stored.command;
+    if (text) vscode.postMessage({ type: 'copy', text });
+    return;
+  }
+  const rerunBtn = target.closest('.block-rerun');
+  if (rerunBtn) {
+    if (rerunBtn.disabled || command.disabled) return;
+    const block = rerunBtn.closest('.block');
+    const stored = block ? blockText.get(block.dataset.id) : null;
+    if (stored?.command) vscode.postMessage({ type: 'send', text: stored.command });
     return;
   }
   const button = target.closest('.command');
