@@ -127,7 +127,7 @@ button, textarea {
   cursor: pointer;
 }
 
-#clear:disabled, #run:disabled, #snippets button:disabled, #jpoToggle:disabled, #jpoRun:disabled, #jpoPath:disabled, #find-prev:disabled, #find-next:disabled, #recall-clear:disabled, #drawer-refresh:disabled, #list-kind:disabled {
+#clear:disabled, #run:disabled, #snippets button:disabled, #commandClear:disabled, #jpoToggle:disabled, #jpoRun:disabled, #jpoPath:disabled, #find-prev:disabled, #find-next:disabled, #recall-clear:disabled, #drawer-refresh:disabled, #list-kind:disabled {
   opacity: 0.45;
   cursor: default;
 }
@@ -157,7 +157,7 @@ button, textarea {
   margin-top: auto;
 }
 
-body.history-hidden #history {
+body.drawer-open.history-hidden #history {
   flex: 0 0 0px;
   width: 0;
   padding: 0;
@@ -165,7 +165,7 @@ body.history-hidden #history {
   visibility: hidden;
 }
 
-body.history-hidden #stage {
+body.drawer-open.history-hidden #stage {
   justify-content: flex-end;
 }
 
@@ -328,8 +328,39 @@ body[data-drawer="list"] #list-view {
 }
 
 #drawer-refresh:hover:not(:disabled),
-#drawer-close:hover {
+#drawer-close:hover,
+#drawer-wide:hover {
   background: var(--vscode-toolbar-hoverBackground);
+}
+
+#drawer-wide {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground);
+  cursor: pointer;
+}
+
+#drawer-wide[aria-pressed="true"] {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+#drawer-wide .icon-shrink,
+body.history-hidden #drawer-wide .icon-expand {
+  display: none;
+}
+
+body.history-hidden #drawer-wide .icon-shrink {
+  display: block;
 }
 
 #help-view,
@@ -465,7 +496,9 @@ body[data-drawer="list"] #list-view {
   overflow-x: auto;
 }
 
-#snippets button {
+#snippets button,
+#commandClear {
+  flex: 0 0 auto;
   height: 22px;
   padding: 0 6px;
   border: 0;
@@ -477,7 +510,8 @@ body[data-drawer="list"] #list-view {
   cursor: pointer;
 }
 
-#snippets button:hover:not(:disabled) {
+#snippets button:hover:not(:disabled),
+#commandClear:hover:not(:disabled) {
   background: var(--vscode-toolbar-hoverBackground);
 }
 
@@ -769,6 +803,7 @@ mark.hit.on {
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
+.recall-pin,
 .recall-insert,
 .recall-delete {
   display: inline-flex;
@@ -785,6 +820,11 @@ mark.hit.on {
   cursor: pointer;
 }
 
+.recall-pin[aria-pressed='true'] {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+}
+
+.recall-pin:hover,
 .recall-insert:hover,
 .recall-delete:hover {
   background: var(--vscode-toolbar-hoverBackground);
@@ -792,6 +832,7 @@ mark.hit.on {
 }
 
 .recall:focus,
+.recall-pin:focus,
 .recall-insert:focus,
 .recall-delete:focus {
   outline: 1px solid var(--vscode-focusBorder);

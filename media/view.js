@@ -5,6 +5,7 @@ const restartButton = document.getElementById('restart');
 const clearBar = document.querySelector('.bar');
 const split = document.getElementById('split');
 const runButton = document.getElementById('run');
+const commandClear = document.getElementById('commandClear');
 const composerToggle = document.getElementById('composerToggle');
 const snippetButtons = document.querySelectorAll('#snippets button');
 const jpo = document.getElementById('jpo');
@@ -30,7 +31,6 @@ const findPrev = document.getElementById('find-prev');
 const findNext = document.getElementById('find-next');
 const stage = document.getElementById('stage');
 const rail = document.getElementById('rail');
-const railHistory = document.getElementById('rail-history');
 const railHelp = document.getElementById('rail-help');
 const railList = document.getElementById('rail-list');
 const drawer = document.getElementById('drawer');
@@ -42,6 +42,7 @@ const listFilter = document.getElementById('list-filter');
 const listView = document.getElementById('list-view');
 const drawerRefresh = document.getElementById('drawer-refresh');
 const drawerClose = document.getElementById('drawer-close');
+const drawerWide = document.getElementById('drawer-wide');
 const rowMenu = document.getElementById('row-menu');
 const collapsed = new Set();
 const blockText = new Map();
@@ -118,9 +119,26 @@ let activeToken = 0;
 let sideToken = 0;
 let pendingLane = '';
 let rowMenuText = '';
+let hydrated = false;
+let splitRatio = 0.6;
+let recallWidth = 200;
+let drawerWidth = 300;
 
 function follow() {
   history.scrollTop = history.scrollHeight;
+}
+
+function syncCommandClear() {
+  commandClear.disabled = command.disabled || command.value === '';
+}
+
+function clearCommand() {
+  if (command.disabled || command.value === '') return;
+  closeAssist();
+  command.value = '';
+  syncCommandClear();
+  command.focus();
+  savePrefs();
 }
 
 function setInputEnabled(enabled) {
@@ -130,6 +148,7 @@ function setInputEnabled(enabled) {
   for (const button of snippetButtons) button.disabled = !enabled;
   jpoToggle.disabled = !enabled;
   jpoPath.disabled = !enabled;
+  syncCommandClear();
   syncJpoPath();
   syncDrawerControls();
   if (!enabled) closeAssist();
@@ -400,6 +419,7 @@ function blockNode(block) {
 }
 
 function render(state) {
+  if (!hydrated && state.prefs) hydratePrefs(state.prefs);
   const nodes = [];
   for (const notice of state.notices) nodes.push(noticeNode(notice));
   for (const block of state.blocks) nodes.push(blockNode(block));
@@ -411,6 +431,75 @@ function render(state) {
   setClearEnabled(state.clearEnabled);
   follow();
   syncFind(false);
+}
+
+function collectRecalls() {
+  const items = [];
+  for (const row of recallList.children) {
+    const text = (row.dataset.text || '').trim();
+    if (!text) continue;
+    const pinned = row.classList.contains('pinned');
+    items.push(pinned ? { text, pinned: true } : { text });
+  }
+  return items;
+}
+
+function savePrefs() {
+  if (!hydrated) return;
+  const open = document.body.classList.contains('drawer-open');
+  vscode.postMessage({
+    type: 'prefs',
+    prefs: {
+      recalls: collectRecalls(),
+      jpoOpen: jpo.classList.contains('on'),
+      jpoPath: jpoPath.value,
+      commandText: command.value,
+      splitRatio,
+      recallWidth,
+      drawerWidth,
+      composerHidden: document.body.classList.contains('composer-hidden'),
+      historyHidden: document.body.classList.contains('history-hidden'),
+      drawerLane: open ? drawerLane : '',
+      listKind: listKind.value,
+    },
+  });
+}
+
+function hydratePrefs(prefs) {
+  if (!prefs || hydrated) return;
+  if (typeof prefs.jpoPath === 'string') jpoPath.value = prefs.jpoPath;
+  syncJpoPath();
+  setJpoOpen(Boolean(prefs.jpoOpen));
+  if (typeof prefs.commandText === 'string' && command.value === '') command.value = prefs.commandText;
+  syncCommandClear();
+  if (typeof prefs.recallWidth === 'number') setRecallWidth(prefs.recallWidth);
+  if (typeof prefs.drawerWidth === 'number') setDrawerWidth(prefs.drawerWidth);
+  if (typeof prefs.splitRatio === 'number') applySplit(prefs.splitRatio);
+  if (prefs.composerHidden) setComposerHidden(true);
+  if (prefs.historyHidden) {
+    document.body.classList.add('history-hidden');
+    syncHistory();
+  }
+  if (typeof prefs.listKind === 'string' && prefs.listKind) {
+    listKind.value = prefs.listKind;
+    sentKind = listKind.value;
+  }
+  if (prefs.drawerLane === 'help' || prefs.drawerLane === 'list') {
+    drawerLane = prefs.drawerLane;
+    setDrawerOpen(true);
+  }
+  if (Array.isArray(prefs.recalls)) {
+    const rows = [];
+    for (const item of prefs.recalls) {
+      if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
+      const row = recallNode('', item.text.trim(), Boolean(item.pinned));
+      row.hidden = !matchRecall(row);
+      rows.push(row);
+    }
+    recallList.replaceChildren(...rows);
+    syncRecallClear();
+  }
+  hydrated = true;
 }
 
 function recallIcon(d) {
@@ -426,16 +515,28 @@ function recallIcon(d) {
   return svg;
 }
 
-function recallNode(id, text) {
+function syncPinButton(button, pinned) {
+  const label = pinned ? '고정 해제' : '고정';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+}
+
+function recallNode(id, text, pinned = false) {
   const row = document.createElement('div');
-  row.className = 'recall-row';
-  row.dataset.id = String(id);
+  row.className = pinned ? 'recall-row pinned' : 'recall-row';
+  row.dataset.id = id == null ? '' : String(id);
   row.dataset.text = text;
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'recall';
   button.textContent = text;
   button.title = text;
+  const pin = document.createElement('button');
+  pin.type = 'button';
+  pin.className = 'recall-pin';
+  syncPinButton(pin, pinned);
+  pin.append(recallIcon('M9.8 1.5 14.5 6.2 13.4 7.3 12.1 6 9.3 8.8 10.2 11.7 9.1 12.8 6.2 9.9 2.6 13.5 1.8 12.7 5.4 9.1 2.5 6.2 3.6 5.1 6.5 6 9.3 3.2 8 1.9z'));
   const insert = document.createElement('button');
   insert.type = 'button';
   insert.className = 'recall-insert';
@@ -448,8 +549,25 @@ function recallNode(id, text) {
   remove.title = '삭제';
   remove.setAttribute('aria-label', '삭제');
   remove.append(recallIcon('M6 1.6h4l.8 1.5H14v1.3H2V3.1h3.2L6 1.6zM3.3 5.6h9.4l-.7 8.6H4l-.7-8.6z'));
-  row.append(button, insert, remove);
+  row.append(button, pin, insert, remove);
   return row;
+}
+
+function placeUnpinnedRow(row) {
+  const pinnedRows = recallList.querySelectorAll('.recall-row.pinned');
+  if (pinnedRows.length > 0) pinnedRows[pinnedRows.length - 1].after(row);
+  else recallList.prepend(row);
+}
+
+function toggleRecallPin(row) {
+  const pinned = !row.classList.contains('pinned');
+  row.classList.toggle('pinned', pinned);
+  const pin = row.querySelector('.recall-pin');
+  if (pin) syncPinButton(pin, pinned);
+  if (pinned) recallList.prepend(row);
+  else placeUnpinnedRow(row);
+  syncRecallClear();
+  savePrefs();
 }
 
 function recallQuery() {
@@ -467,51 +585,64 @@ function applyRecallFilter() {
 }
 
 function syncRecallClear() {
-  recallClear.disabled = recallList.children.length === 0;
+  recallClear.disabled = recallList.querySelector('.recall-row:not(.pinned)') === null;
 }
 
-function addRecall(id, text) {
+function addRecall(id, text, persist = true) {
   const key = String(id);
-  if (dismissedRecall.has(key)) return;
   for (const item of recallList.children) {
-    if (item.dataset.id !== key) continue;
+    if (item.dataset.text !== text) continue;
+    item.dataset.id = key;
     item.classList.remove('missing');
+    if (!item.classList.contains('pinned')) placeUnpinnedRow(item);
+    if (persist) savePrefs();
     return;
   }
-  const row = recallNode(id, text);
-  recallList.prepend(row);
+  if (dismissedRecall.has(key)) return;
+  const row = recallNode(id, text, false);
+  placeUnpinnedRow(row);
   row.hidden = !matchRecall(row);
-  if (!row.hidden) recallList.scrollTop = 0;
+  if (!row.hidden && !row.classList.contains('pinned')) recallList.scrollTop = 0;
   syncRecallClear();
+  if (persist) savePrefs();
 }
 
-function dropRecall(id) {
-  const key = String(id);
-  dismissedRecall.add(key);
-  for (const item of recallList.children) {
-    if (item.dataset.id !== key) continue;
-    item.remove();
-    break;
-  }
+function dropRecall(row) {
+  if (row.dataset.id) dismissedRecall.add(row.dataset.id);
+  row.remove();
   syncRecallClear();
+  savePrefs();
 }
 
 function clearRecall() {
-  for (const item of recallList.children) dismissedRecall.add(item.dataset.id);
-  recallList.replaceChildren();
+  for (const item of [...recallList.querySelectorAll('.recall-row:not(.pinned)')]) {
+    if (item.dataset.id) dismissedRecall.add(item.dataset.id);
+    item.remove();
+  }
   syncRecallClear();
+  savePrefs();
 }
 
 function setRecallWidth(width) {
-  if (composer.clientWidth <= 0) return;
-  const available = composer.clientWidth - recallSplit.offsetWidth;
   const minRecall = 112;
+  if (composer.clientWidth <= 0) {
+    recallWidth = Math.max(minRecall, Math.round(width));
+    recall.style.width = recallWidth + 'px';
+    return;
+  }
+  const available = composer.clientWidth - recallSplit.offsetWidth;
   const maxRecall = Math.max(minRecall, available - 96);
-  recall.style.width = Math.min(maxRecall, Math.max(minRecall, width)) + 'px';
+  recallWidth = Math.round(Math.min(maxRecall, Math.max(minRecall, width)));
+  recall.style.width = recallWidth + 'px';
 }
 
 function ensureRecall(blocks) {
-  for (const block of blocks) addRecall(block.id, block.command);
+  let changed = false;
+  for (const block of blocks) {
+    addRecall(block.id, block.command, false);
+    changed = true;
+  }
+  if (changed) savePrefs();
 }
 
 function markRecall() {
@@ -566,20 +697,330 @@ function caretOffset() {
   return command.selectionEnd ?? command.value.length;
 }
 
-function statementAt(text, cursor) {
-  const semi = text.slice(0, cursor).lastIndexOf(';');
-  const next = text.indexOf(';', cursor);
-  const to = next === -1 ? text.length : next + 1;
-  if (semi !== -1 && text.slice(semi + 1, cursor).trim() === '') {
-    if (text.slice(cursor, to).trim() === '') {
-      const prev = semi === 0 ? -1 : text.lastIndexOf(';', semi - 1);
-      const from = prev === -1 ? 0 : prev + 1;
-      return text.slice(from, semi + 1).trim();
+const MQL_STARTERS = new Set([
+  'temp',
+  'query',
+  'print',
+  'expand',
+  'list',
+  'add',
+  'modify',
+  'delete',
+  'connect',
+  'disconnect',
+  'promote',
+  'demote',
+  'set',
+  'insert',
+  'start',
+  'commit',
+  'abort',
+  'help',
+  'version',
+  'quit',
+  'exit',
+  'exec',
+  'execute',
+  'eval',
+  'evaluate',
+  'run',
+  'compile',
+  'approve',
+  'reject',
+  'ignore',
+  'enable',
+  'disable',
+  'override',
+  'trigger',
+  'push',
+  'pop',
+  'history',
+  'clear',
+  'copy',
+  'move',
+  'transfer',
+  'lock',
+  'unlock',
+  'checkin',
+  'checkout',
+]);
+
+const MQL_HEADER_TARGETS = new Set([
+  'bus',
+  'businessobject',
+  'connection',
+  'type',
+  'policy',
+  'attribute',
+  'relationship',
+  'person',
+  'program',
+  'prog',
+  'command',
+  'menu',
+  'form',
+  'vault',
+  'role',
+  'group',
+  'association',
+  'context',
+  'transaction',
+  'channel',
+  'portal',
+  'table',
+  'system',
+  'page',
+  'index',
+  'store',
+  'site',
+  'dimension',
+  'expression',
+  'rule',
+]);
+
+function tokenizeMql(text) {
+  const tokens = [];
+  let i = 0;
+  const len = text.length;
+  while (i < len) {
+    const ch = text[i];
+    if (ch === '\r' || ch === '\n') {
+      let j = i + 1;
+      while (j < len && (text[j] === '\r' || text[j] === '\n')) j += 1;
+      tokens.push({ type: 'newline', value: '\n', start: i, end: j });
+      i = j;
+      continue;
     }
-    return text.slice(cursor, to).trim();
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === ';') {
+      tokens.push({ type: 'semi', value: ';', start: i, end: i + 1 });
+      i += 1;
+      continue;
+    }
+    let j = i;
+    let quote = '';
+    let bracketDepth = 0;
+    while (j < len) {
+      const c = text[j];
+      if (quote) {
+        if (c === '\\' && j + 1 < len) {
+          j += 2;
+          continue;
+        }
+        if (c === quote) quote = '';
+        j += 1;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        j += 1;
+        continue;
+      }
+      if (c === '[') {
+        bracketDepth += 1;
+        j += 1;
+        continue;
+      }
+      if (c === ']') {
+        if (bracketDepth > 0) bracketDepth -= 1;
+        j += 1;
+        continue;
+      }
+      if (bracketDepth === 0 && (/\s/.test(c) || c === ';')) break;
+      j += 1;
+    }
+    tokens.push({ type: 'word', value: text.slice(i, j), start: i, end: j });
+    i = j;
   }
-  const from = semi === -1 ? 0 : semi + 1;
-  return text.slice(from, to).trim();
+  return tokens;
+}
+
+function isStarterSequence(words, index) {
+  const w0 = words[index]?.value.toLowerCase();
+  if (!w0 || !MQL_STARTERS.has(w0)) return false;
+  if (w0 === 'temp') return words[index + 1]?.value.toLowerCase() === 'query';
+  return true;
+}
+
+function splitMqlStatements(text) {
+  const tokens = tokenizeMql(text);
+  const statements = [];
+  let current = [];
+  let startOffset = -1;
+  let endOffset = -1;
+  let afterNewline = false;
+
+  const flush = () => {
+    if (current.length > 0) {
+      statements.push({ words: current, start: startOffset, end: endOffset });
+      current = [];
+      startOffset = -1;
+      endOffset = -1;
+    }
+    afterNewline = false;
+  };
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i];
+    if (tok.type === 'semi') {
+      if (current.length > 0) {
+        endOffset = tok.end;
+        flush();
+      }
+      continue;
+    }
+    if (tok.type === 'newline') {
+      if (current.length > 0) afterNewline = true;
+      continue;
+    }
+    if (afterNewline && current.length > 0) {
+      const restWords = [];
+      for (let k = i; k < tokens.length && restWords.length < 2; k += 1) {
+        if (tokens[k].type === 'semi' || tokens[k].type === 'newline') break;
+        if (tokens[k].type === 'word') restWords.push(tokens[k]);
+      }
+      if (isStarterSequence(restWords, 0)) {
+        flush();
+      } else {
+        afterNewline = false;
+      }
+    }
+    if (current.length === 0) startOffset = tok.start;
+    endOffset = tok.end;
+    current.push(tok);
+  }
+  flush();
+  return statements;
+}
+
+function minHeaderLength(words) {
+  if (words.length === 0) return 0;
+  const w0 = words[0].value.toLowerCase();
+  const w1 = words[1]?.value.toLowerCase() || '';
+  const w2 = words[2]?.value.toLowerCase() || '';
+  if (w0 === 'temp' && w1 === 'query' && (w2 === 'bus' || w2 === 'businessobject')) return Math.min(words.length, 6);
+  if (w0 === 'query' && (w1 === 'bus' || w1 === 'businessobject')) return Math.min(words.length, 5);
+  if ((w0 === 'print' || w0 === 'expand' || w0 === 'modify' || w0 === 'add' || w0 === 'delete' || w0 === 'promote' || w0 === 'demote' || w0 === 'connect' || w0 === 'disconnect') && (w1 === 'bus' || w1 === 'businessobject')) {
+    if (words[2] && /^[0-9]+(\.[0-9]+)+$/.test(words[2].value)) return 3;
+    return Math.min(words.length, 5);
+  }
+  if ((w0 === 'print' || w0 === 'list' || w0 === 'modify' || w0 === 'add' || w0 === 'delete') && MQL_HEADER_TARGETS.has(w1)) {
+    return Math.min(words.length, w1 === 'context' ? 2 : 3);
+  }
+  return 1;
+}
+
+function isClauseBreak(words, idx, headerEnd) {
+  if (idx < headerEnd) return false;
+  const lower = words[idx].value.toLowerCase();
+  const prev = words[idx - 1]?.value.toLowerCase() || '';
+  if (prev === 'orderby' || prev === 'limit' || prev === 'dump' || prev === 'recordsep' || prev === 'recurse') return false;
+  if (lower === 'where' || lower === 'select' || lower === 'orderby' || lower === 'limit' || lower === 'dump' || lower === 'recordsep' || lower === 'tcl' || lower === 'output') {
+    return true;
+  }
+  const w0 = words[0].value.toLowerCase();
+  const w1 = words[1]?.value.toLowerCase() || '';
+  if (w0 === 'expand' && (lower === 'from' || lower === 'to' || lower === 'relationship' || lower === 'rel' || lower === 'type' || lower === 'recurse' || lower === 'terse')) {
+    if ((lower === 'relationship' || lower === 'rel') && (prev === 'from' || prev === 'to')) return false;
+    return true;
+  }
+  if ((w0 === 'temp' || w0 === 'query') && (lower === 'vault' || lower === 'owner')) {
+    return true;
+  }
+  if ((w0 === 'modify' || w0 === 'add') && (w1 === 'bus' || w1 === 'businessobject') && (lower === 'description' || lower === 'policy' || lower === 'vault' || lower === 'owner' || lower === 'current')) {
+    return true;
+  }
+  return false;
+}
+
+function formatSingleStatement(words) {
+  if (words.length === 0) return '';
+  const headerEnd = minHeaderLength(words);
+  const lines = [];
+  let currentLine = [];
+  let inSelect = false;
+
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i].value;
+    const lower = word.toLowerCase();
+    const shouldBreak = isClauseBreak(words, i, headerEnd) && !(inSelect && lower !== 'where' && lower !== 'dump' && lower !== 'recordsep' && lower !== 'tcl' && lower !== 'output' && lower !== 'orderby' && lower !== 'limit');
+
+    if (shouldBreak && currentLine.length > 0) {
+      lines.push(lines.length === 0 ? currentLine.join(' ') : '  ' + currentLine.join(' '));
+      currentLine = [];
+      inSelect = lower === 'select';
+    } else if (i >= headerEnd && lower === 'select') {
+      inSelect = true;
+    }
+
+    currentLine.push(word);
+  }
+
+  if (currentLine.length > 0) {
+    lines.push(lines.length === 0 ? currentLine.join(' ') : '  ' + currentLine.join(' '));
+  }
+
+  const joined = lines.join('\n');
+  return joined.endsWith(';') ? joined : `${joined};`;
+}
+
+function formatMqlText(text) {
+  const statements = splitMqlStatements(text);
+  if (statements.length === 0) return '';
+  return statements.map((stmt) => formatSingleStatement(stmt.words)).join('\n\n');
+}
+
+function flattenStatement(words) {
+  if (words.length === 0) return '';
+  const line = words.map((w) => w.value).join(' ');
+  return line.endsWith(';') ? line : `${line};`;
+}
+
+function formatCommand() {
+  if (command.disabled) return;
+  closeAssist();
+  const value = command.value;
+  if (!value.trim()) return;
+  const start = command.selectionStart ?? 0;
+  const end = command.selectionEnd ?? start;
+  if (start !== end) {
+    const selected = value.slice(start, end);
+    if (!selected.trim()) return;
+    const formatted = formatMqlText(selected);
+    if (!formatted) return;
+    command.value = value.slice(0, start) + formatted + value.slice(end);
+    command.selectionStart = start;
+    command.selectionEnd = start + formatted.length;
+  } else {
+    const formatted = formatMqlText(value);
+    if (!formatted) return;
+    command.value = formatted;
+    const caret = formatted.length;
+    command.selectionStart = caret;
+    command.selectionEnd = caret;
+  }
+  syncCommandClear();
+  command.focus();
+  savePrefs();
+}
+
+function statementAt(text, cursor) {
+  const statements = splitMqlStatements(text);
+  if (statements.length === 0) return '';
+  for (const stmt of statements) {
+    if (cursor >= stmt.start && cursor <= stmt.end) {
+      return flattenStatement(stmt.words);
+    }
+  }
+  let chosen = statements[0];
+  for (const stmt of statements) {
+    if (stmt.start <= cursor) chosen = stmt;
+    else break;
+  }
+  return flattenStatement(chosen.words);
 }
 
 function statementAtCursor() {
@@ -612,6 +1053,7 @@ function setJpoOpen(open) {
   jpoToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
   jpoToggle.title = open ? 'JPO 경로 닫기' : 'JPO 경로';
   if (open && !jpoPath.disabled) jpoPath.focus();
+  savePrefs();
 }
 
 function runJpo() {
@@ -631,7 +1073,9 @@ function insertStatement(text) {
   const caret = command.value.length;
   command.selectionStart = caret;
   command.selectionEnd = caret;
+  syncCommandClear();
   command.focus();
+  savePrefs();
 }
 
 function appendClause(text, pick) {
@@ -649,7 +1093,9 @@ function appendClause(text, pick) {
   const end = at === -1 ? start : start + pick.length;
   command.selectionStart = start;
   command.selectionEnd = end;
+  syncCommandClear();
   command.focus();
+  savePrefs();
 }
 
 function insertAtCursor(text) {
@@ -660,7 +1106,9 @@ function insertAtCursor(text) {
   const caret = start + text.length;
   command.selectionStart = caret;
   command.selectionEnd = caret;
+  syncCommandClear();
   command.focus();
+  savePrefs();
 }
 
 function insertAtCaret(text) {
@@ -670,7 +1118,9 @@ function insertAtCaret(text) {
   const next = caret + text.length;
   command.selectionStart = next;
   command.selectionEnd = next;
+  syncCommandClear();
   command.focus();
+  savePrefs();
 }
 
 function resultSelection() {
@@ -739,15 +1189,20 @@ function syncDrawerControls() {
 }
 
 function syncHistory() {
-  const open = !document.body.classList.contains('history-hidden');
-  railHistory.setAttribute('aria-pressed', open ? 'true' : 'false');
-  history.inert = !open;
-  history.setAttribute('aria-hidden', open ? 'false' : 'true');
+  const wide = document.body.classList.contains('history-hidden');
+  const hidden = wide && document.body.classList.contains('drawer-open');
+  const label = wide ? '원래 너비' : '전체 너비';
+  drawerWide.title = label;
+  drawerWide.setAttribute('aria-label', label);
+  drawerWide.setAttribute('aria-pressed', wide ? 'true' : 'false');
+  history.inert = hidden;
+  history.setAttribute('aria-hidden', hidden ? 'true' : 'false');
 }
 
 function toggleHistory() {
   document.body.classList.toggle('history-hidden');
   syncHistory();
+  savePrefs();
 }
 
 function syncRail() {
@@ -841,12 +1296,16 @@ function fetchDrawerIfEmpty() {
 }
 
 function setDrawerWidth(width) {
-  if (stage.clientWidth <= 0) return;
-  const available = stage.clientWidth - rail.offsetWidth;
   const minDrawer = 180;
+  if (stage.clientWidth <= 0) {
+    drawerWidth = Math.max(minDrawer, Math.round(width));
+    document.body.style.setProperty('--drawer-width', drawerWidth + 'px');
+    return;
+  }
+  const available = stage.clientWidth - rail.offsetWidth;
   const maxDrawer = Math.max(minDrawer, available - 96);
-  const next = Math.min(maxDrawer, Math.max(minDrawer, width));
-  document.body.style.setProperty('--drawer-width', next + 'px');
+  drawerWidth = Math.round(Math.min(maxDrawer, Math.max(minDrawer, width)));
+  document.body.style.setProperty('--drawer-width', drawerWidth + 'px');
 }
 
 function setDrawerOpen(open) {
@@ -854,7 +1313,9 @@ function setDrawerOpen(open) {
   if (open) document.body.dataset.drawer = drawerLane;
   if (!open) closeRowMenu();
   syncRail();
+  syncHistory();
   if (open) fetchDrawerIfEmpty();
+  savePrefs();
 }
 
 function toggleDrawer(lane) {
@@ -929,6 +1390,7 @@ function setComposerHidden(hidden) {
   composerToggle.setAttribute('aria-pressed', hidden ? 'true' : 'false');
   if (hidden) closeAssist();
   else if (!command.disabled) command.focus();
+  savePrefs();
 }
 
 function applySplit(ratio) {
@@ -937,7 +1399,8 @@ function applySplit(ratio) {
   const min = 72;
   const minRatio = available > min * 2 ? min / available : 0.4;
   const maxRatio = available > min * 2 ? (available - min) / available : 0.6;
-  const next = Math.min(maxRatio, Math.max(minRatio, ratio));
+  const next = available > min * 2 ? Math.min(maxRatio, Math.max(minRatio, ratio)) : Math.min(0.85, Math.max(0.15, ratio));
+  splitRatio = next;
   stage.style.flexGrow = String(next);
   composer.style.flexGrow = String(1 - next);
 }
@@ -985,6 +1448,7 @@ window.addEventListener('message', (event) => {
   }
   if (message.type === 'clearEnabled') setClearEnabled(message.enabled);
   if (message.type === 'suggest') openAssist();
+  if (message.type === 'format') formatCommand();
   if (message.type === 'sideStart') onSideStart(message);
   if (message.type === 'sideChunk') onSideChunk(message);
   if (message.type === 'sideEnd') onSideEnd(message);
@@ -1094,7 +1558,12 @@ window.addEventListener('keydown', (event) => {
   }
   if (event.key !== 'f' && event.key !== 'F') return;
   if (!event.ctrlKey && !event.metaKey) return;
-  if (event.altKey || event.shiftKey) return;
+  if (event.altKey) return;
+  if (event.shiftKey) {
+    event.preventDefault();
+    formatCommand();
+    return;
+  }
   event.preventDefault();
   closeAssist();
   findInput.focus();
@@ -1106,8 +1575,12 @@ recallList.addEventListener('click', (event) => {
   if (!(target instanceof Element)) return;
   const row = target.closest('.recall-row');
   if (!row) return;
+  if (target.closest('.recall-pin')) {
+    toggleRecallPin(row);
+    return;
+  }
   if (target.closest('.recall-delete')) {
-    dropRecall(row.dataset.id ?? '');
+    dropRecall(row);
     return;
   }
   if (target.closest('.recall-insert')) {
@@ -1115,7 +1588,10 @@ recallList.addEventListener('click', (event) => {
     return;
   }
   const block = blockById(row.dataset.id ?? '');
-  if (!block) return;
+  if (!block) {
+    insertAtCursor(row.dataset.text ?? '');
+    return;
+  }
   showCommand(block);
 });
 
@@ -1142,6 +1618,7 @@ recallSplit.addEventListener('mousedown', (event) => {
     document.body.style.userSelect = previous;
     window.removeEventListener('mousemove', move);
     window.removeEventListener('mouseup', up);
+    savePrefs();
   };
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', up);
@@ -1280,7 +1757,9 @@ function acceptAssist() {
   command.selectionStart = caret;
   command.selectionEnd = caret;
   closeAssist();
+  syncCommandClear();
   command.focus();
+  savePrefs();
 }
 
 command.addEventListener('keydown', (event) => {
@@ -1317,6 +1796,8 @@ command.addEventListener('keydown', (event) => {
 });
 
 command.addEventListener('input', () => {
+  syncCommandClear();
+  savePrefs();
   if (assist.hidden) return;
   openAssist();
 });
@@ -1396,6 +1877,10 @@ runButton.addEventListener('click', () => {
   runStatement();
 });
 
+commandClear.addEventListener('click', () => {
+  clearCommand();
+});
+
 composerToggle.addEventListener('click', () => {
   setComposerHidden(!document.body.classList.contains('composer-hidden'));
 });
@@ -1407,6 +1892,7 @@ jpoToggle.addEventListener('click', () => {
 
 jpoPath.addEventListener('input', () => {
   syncJpoPath();
+  savePrefs();
 });
 
 jpoRun.addEventListener('click', () => {
@@ -1434,7 +1920,7 @@ document.getElementById('snippets').addEventListener('click', (event) => {
 
 split.addEventListener('mousedown', (event) => {
   if (document.body.classList.contains('composer-hidden')) return;
-  if (!(event.target instanceof Element) || event.target.closest('#run') || event.target.closest('#composerToggle') || event.target.closest('#snippets') || event.target.closest('#jpo')) return;
+  if (!(event.target instanceof Element) || event.target.closest('#run') || event.target.closest('#commandClear') || event.target.closest('#composerToggle') || event.target.closest('#snippets') || event.target.closest('#jpo')) return;
   event.preventDefault();
   const previous = document.body.style.userSelect;
   document.body.style.userSelect = 'none';
@@ -1448,13 +1934,10 @@ split.addEventListener('mousedown', (event) => {
     document.body.style.userSelect = previous;
     window.removeEventListener('mousemove', move);
     window.removeEventListener('mouseup', up);
+    savePrefs();
   };
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', up);
-});
-
-railHistory.addEventListener('click', () => {
-  toggleHistory();
 });
 
 railHelp.addEventListener('click', () => {
@@ -1467,6 +1950,10 @@ railList.addEventListener('click', () => {
 
 drawerClose.addEventListener('click', () => {
   setDrawerOpen(false);
+});
+
+drawerWide.addEventListener('click', () => {
+  toggleHistory();
 });
 
 drawerSplit.addEventListener('mousedown', (event) => {
@@ -1487,6 +1974,7 @@ drawerSplit.addEventListener('mousedown', (event) => {
     document.body.classList.remove('drawer-resizing');
     window.removeEventListener('mousemove', move);
     window.removeEventListener('mouseup', up);
+    savePrefs();
   };
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', up);
@@ -1506,6 +1994,7 @@ listFilter.addEventListener('input', () => {
 });
 
 listKind.addEventListener('change', () => {
+  savePrefs();
   if (listKind.value === listFetchedKind) return;
   if (!requestSide('list', `list ${listKind.value}`)) listKind.value = listFetchedKind || listKind.value;
 });

@@ -4,6 +4,8 @@ import { MqlSession } from './session';
 const failNotice = 'mql을 시작하지 못했습니다';
 const batchNotice = '배치가 표준 입력을 넘기지 못해 프롬프트가 오지 않았습니다';
 const contextCommand = 'set context user creator;';
+const prefsKey = 'enovia-mql.prefs';
+const maxRecalls = 200;
 
 type Block = {
   id: number;
@@ -13,6 +15,25 @@ type Block = {
 
 type SideLane = 'help' | 'list';
 
+type RecallItem = {
+  text: string;
+  pinned?: boolean;
+};
+
+type SavedPrefs = {
+  recalls: RecallItem[];
+  jpoOpen: boolean;
+  jpoPath: string;
+  commandText: string;
+  splitRatio: number;
+  recallWidth: number;
+  drawerWidth: number;
+  composerHidden: boolean;
+  historyHidden: boolean;
+  drawerLane: '' | SideLane;
+  listKind: string;
+};
+
 type Outbound =
   | {
       type: 'state';
@@ -20,6 +41,7 @@ type Outbound =
       clearEnabled: boolean;
       blocks: Block[];
       notices: string[];
+      prefs: SavedPrefs;
     }
   | { type: 'block'; id: number; command: string }
   | { type: 'chunk'; id: number; text: string }
@@ -27,12 +49,13 @@ type Outbound =
   | { type: 'input'; enabled: boolean }
   | { type: 'clearEnabled'; enabled: boolean }
   | { type: 'suggest' }
+  | { type: 'format' }
   | { type: 'sideStart'; lane: SideLane; token: number }
   | { type: 'sideChunk'; lane: SideLane; token: number; text: string }
   | { type: 'sideEnd'; lane: SideLane; token: number };
 
 export function activate(context: vscode.ExtensionContext) {
-  const host = new MqlHost(context.extensionUri);
+  const host = new MqlHost(context.extensionUri, context.globalState);
   const status = vscode.window.createStatusBarItem('enovia-mql.open', vscode.StatusBarAlignment.Left, 100);
   status.name = 'ENOVIA MQL';
   status.text = '$(terminal)';
@@ -46,6 +69,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('enovia-mql.suggest', () => {
       host.suggest();
     }),
+    vscode.commands.registerCommand('enovia-mql.format', () => {
+      host.format();
+    }),
     status,
     host,
   );
@@ -56,8 +82,14 @@ export function deactivate() {}
 class MqlHost implements vscode.Disposable {
   private readonly views: MqlView[] = [];
   private readonly slots = new Set<number>();
+  private prefs: SavedPrefs;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly state: vscode.Memento,
+  ) {
+    this.prefs = parsePrefs(this.state.get(prefsKey));
+  }
 
   dispose() {
     for (const view of [...this.views]) view.dispose();
@@ -67,11 +99,20 @@ class MqlHost implements vscode.Disposable {
     let slot = 1;
     while (this.slots.has(slot)) slot += 1;
     this.slots.add(slot);
-    const view = new MqlView(this.extensionUri, slot, () => {
-      this.slots.delete(slot);
-      const index = this.views.indexOf(view);
-      if (index >= 0) this.views.splice(index, 1);
-    });
+    const view = new MqlView(
+      this.extensionUri,
+      slot,
+      () => this.prefs,
+      (raw) => {
+        this.prefs = parsePrefs(raw, this.prefs);
+        void this.state.update(prefsKey, this.prefs);
+      },
+      () => {
+        this.slots.delete(slot);
+        const index = this.views.indexOf(view);
+        if (index >= 0) this.views.splice(index, 1);
+      },
+    );
     this.views.push(view);
     view.open();
   }
@@ -79,6 +120,11 @@ class MqlHost implements vscode.Disposable {
   suggest() {
     const view = this.views.find((item) => item.focused());
     view?.suggest();
+  }
+
+  format() {
+    const view = this.views.find((item) => item.focused());
+    view?.format();
   }
 }
 
@@ -101,6 +147,8 @@ class MqlView implements vscode.Disposable {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly slot: number,
+    private readonly getPrefs: () => SavedPrefs,
+    private readonly savePrefs: (raw: unknown) => void,
     private readonly onClosed: () => void,
   ) {
     this.session = new MqlSession({
@@ -132,6 +180,10 @@ class MqlView implements vscode.Disposable {
 
   suggest() {
     this.post({ type: 'suggest' });
+  }
+
+  format() {
+    this.post({ type: 'format' });
   }
 
   open() {
@@ -202,6 +254,10 @@ class MqlView implements vscode.Disposable {
     }
     if (message.type === 'copy' && typeof message.text === 'string') {
       void vscode.env.clipboard.writeText(message.text);
+      return;
+    }
+    if (message.type === 'prefs') {
+      this.savePrefs(message.prefs);
       return;
     }
     if (message.type === 'clear') this.onClear();
@@ -350,6 +406,7 @@ class MqlView implements vscode.Disposable {
       clearEnabled: this.clearEnabled(),
       blocks: this.blocks.map((block) => ({ ...block })),
       notices: [...this.notices],
+      prefs: this.getPrefs(),
     });
   }
 
@@ -357,6 +414,70 @@ class MqlView implements vscode.Disposable {
     if (!this.domReady || !this.panel) return;
     void this.panel.webview.postMessage(message);
   }
+}
+
+function defaultPrefs(): SavedPrefs {
+  return {
+    recalls: [],
+    jpoOpen: false,
+    jpoPath: '',
+    commandText: '',
+    splitRatio: 0.6,
+    recallWidth: 200,
+    drawerWidth: 300,
+    composerHidden: false,
+    historyHidden: false,
+    drawerLane: '',
+    listKind: 'type',
+  };
+}
+
+function parseRecalls(value: unknown, fallback: RecallItem[]): RecallItem[] {
+  if (!Array.isArray(value)) return fallback;
+  const seen = new Set<string>();
+  const pinned: RecallItem[] = [];
+  const normal: RecallItem[] = [];
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.text !== 'string') continue;
+    const text = item.text.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    if (item.pinned === true) pinned.push({ text, pinned: true });
+    else normal.push({ text });
+  }
+  return [...pinned, ...normal].slice(0, maxRecalls);
+}
+
+function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
+  if (!isRecord(value)) return base;
+  const splitRatio = typeof value.splitRatio === 'number' && Number.isFinite(value.splitRatio)
+    ? Math.min(0.85, Math.max(0.15, value.splitRatio))
+    : base.splitRatio;
+  const recallWidth = typeof value.recallWidth === 'number' && Number.isFinite(value.recallWidth)
+    ? Math.max(112, Math.round(value.recallWidth))
+    : base.recallWidth;
+  const drawerWidth = typeof value.drawerWidth === 'number' && Number.isFinite(value.drawerWidth)
+    ? Math.max(180, Math.round(value.drawerWidth))
+    : base.drawerWidth;
+  const drawerLane = value.drawerLane === 'help' || value.drawerLane === 'list' || value.drawerLane === ''
+    ? value.drawerLane
+    : base.drawerLane;
+  const listKind = typeof value.listKind === 'string' && /^[a-z]+$/.test(value.listKind)
+    ? value.listKind
+    : base.listKind;
+  return {
+    recalls: parseRecalls(value.recalls, base.recalls),
+    jpoOpen: typeof value.jpoOpen === 'boolean' ? value.jpoOpen : base.jpoOpen,
+    jpoPath: typeof value.jpoPath === 'string' ? value.jpoPath : base.jpoPath,
+    commandText: typeof value.commandText === 'string' ? value.commandText : base.commandText,
+    splitRatio,
+    recallWidth,
+    drawerWidth,
+    composerHidden: typeof value.composerHidden === 'boolean' ? value.composerHidden : base.composerHidden,
+    historyHidden: typeof value.historyHidden === 'boolean' ? value.historyHidden : base.historyHidden,
+    drawerLane,
+    listKind,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

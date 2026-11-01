@@ -31,7 +31,6 @@
     <div id="history"></div>
     <div id="rail">
       <div id="drawer-split" title="너비 조절"></div>
-      <button id="rail-history" type="button" title="history" aria-pressed="true">history</button>
       <button id="rail-help" type="button" title="help" aria-pressed="false">help</button>
       <button id="rail-list" type="button" title="list" aria-pressed="false">list</button>
     </div>
@@ -57,6 +56,14 @@
           <input id="list-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="list 필터" />
           <button id="drawer-refresh" type="button" title="조회" aria-label="조회" disabled>조회</button>
           <button id="drawer-close" type="button" title="접기" aria-label="접기">접기</button>
+          <button id="drawer-wide" type="button" title="전체 너비" aria-label="전체 너비" aria-pressed="false">
+            <svg class="icon-expand" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path fill="currentColor" d="M3 3h4v1H4v3H3V3zm10 0v4h-1V4H9V3h4zM3 13V9h1v3h3v1H3zm10 0H9v-1h3V9h1v4z" />
+            </svg>
+            <svg class="icon-shrink" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path fill="currentColor" d="M6 3h1v4H3V6h3V3zm4 0v3h3v1H9V3h1zM6 13v-3H3V9h4v4H6zm4 0H9V9h4v1h-3v3z" />
+            </svg>
+          </button>
         </div>
         <pre id="help-view"></pre>
         <div id="list-view"></div>
@@ -85,6 +92,7 @@
       <button type="button" data-insert="limit" title="limit 0 orderby id select name id description" disabled>+limit</button>
       <button type="button" data-insert="where" title="where &quot;attribute[???] == '???'&quot;" disabled>+where</button>
     </div>
+    <button id="commandClear" type="button" title="입력 지우기" aria-label="입력 지우기" disabled>지우기</button>
     <button id="composerToggle" type="button" title="입력 숨기기" aria-label="입력 숨기기" aria-pressed="false">
       <svg class="icon-minimize" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
         <path fill="currentColor" d="M3 7.5C3 7.22386 3.22386 7 3.5 7H12.5C12.7761 7 13 7.22386 13 7.5C13 7.77614 12.7761 8 12.5 8H3.5C3.22386 8 3 7.77614 3 7.5Z" />
@@ -100,7 +108,7 @@
     <div id="recall">
       <div id="recall-head">
         <input id="recall-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="이력 필터" />
-        <button id="recall-clear" type="button" title="전체 지우기" aria-label="전체 지우기" disabled>전체</button>
+        <button id="recall-clear" type="button" title="이력 지우기" aria-label="이력 지우기" disabled>지우기</button>
       </div>
       <div id="recall-list"></div>
     </div>
