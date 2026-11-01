@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}}; script-src {{csp}};" />
+  <link rel="stylesheet" href="{{css}}" />
+</head>
+<body>
+  <div class="bar">
+    <div id="find">
+      <input id="find-input" type="text" spellcheck="false" autocomplete="off" placeholder="결과 검색" aria-label="결과 검색" />
+      <button id="find-case" type="button" class="find-opt" title="대/소문자 구분 (Alt+C)" aria-label="대/소문자 구분" aria-pressed="false">Aa</button>
+      <button id="find-word" type="button" class="find-opt" title="단어 단위로 (Alt+W)" aria-label="단어 단위로" aria-pressed="false">ab</button>
+      <button id="find-regex" type="button" class="find-opt" title="정규식 사용 (Alt+R)" aria-label="정규식 사용" aria-pressed="false">.*</button>
+      <span id="find-count"></span>
+      <button id="find-prev" type="button" title="이전" aria-label="이전" disabled>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path fill="currentColor" d="M4.2 9.8 8 6.2 11.8 9.8 10.7 10.9 8 8.2 5.3 10.9z" />
+        </svg>
+      </button>
+      <button id="find-next" type="button" title="다음" aria-label="다음" disabled>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path fill="currentColor" d="M4.2 6.2 8 9.8 11.8 6.2 10.7 5.1 8 7.8 5.3 5.1z" />
+        </svg>
+      </button>
+    </div>
+    <button id="restart" type="button" title="세션을 다시 시작합니다">초기화</button>
+    <button id="clear" type="button" disabled>지우기</button>
+  </div>
+  <div id="stage">
+    <div id="history"></div>
+    <div id="rail">
+      <div id="drawer-split" title="너비 조절"></div>
+      <button id="rail-history" type="button" title="history" aria-pressed="true">history</button>
+      <button id="rail-help" type="button" title="help" aria-pressed="false">help</button>
+      <button id="rail-list" type="button" title="list" aria-pressed="false">list</button>
+    </div>
+    <aside id="drawer" aria-hidden="true">
+      <div id="drawer-pane">
+        <div id="drawer-head">
+          <input id="help-find" type="text" spellcheck="false" autocomplete="off" placeholder="검색" aria-label="help 검색" />
+          <select id="list-kind" aria-label="list 대상" disabled>
+            <option value="type">type</option>
+            <option value="person">person</option>
+            <option value="policy">policy</option>
+            <option value="attribute">attribute</option>
+            <option value="relationship">relationship</option>
+            <option value="program">program</option>
+            <option value="vault">vault</option>
+            <option value="role">role</option>
+            <option value="group">group</option>
+            <option value="association">association</option>
+            <option value="command">command</option>
+            <option value="menu">menu</option>
+            <option value="form">form</option>
+          </select>
+          <input id="list-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="list 필터" />
+          <button id="drawer-refresh" type="button" title="조회" aria-label="조회" disabled>조회</button>
+          <button id="drawer-close" type="button" title="접기" aria-label="접기">접기</button>
+        </div>
+        <pre id="help-view"></pre>
+        <div id="list-view"></div>
+      </div>
+    </aside>
+  </div>
+  <div id="split">
+    <button id="run" type="button" title="실행" aria-label="실행" disabled>
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <path fill="currentColor" d="M4.5 2.5v11l9-5.5z" />
+      </svg>
+    </button>
+    <div id="jpo">
+      <button id="jpoToggle" type="button" title="JPO 경로" aria-pressed="false" disabled>jpo</button>
+      <input id="jpoPath" type="text" spellcheck="false" autocomplete="off" placeholder="JPO 파일 경로" disabled />
+      <button id="jpoRun" type="button" title="실행" aria-label="실행" disabled>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path fill="currentColor" d="M4.5 2.5v11l9-5.5z" />
+        </svg>
+      </button>
+    </div>
+    <div id="snippets">
+      <button type="button" data-insert="context" title="set context user creator;" disabled>context</button>
+      <button type="button" data-insert="temp" title="temp query bus * * *" disabled>temp</button>
+      <button type="button" data-insert="print" title="print bus * * *" disabled>print</button>
+      <button type="button" data-insert="limit" title="limit 0 orderby id select name id description" disabled>+limit</button>
+      <button type="button" data-insert="where" title="where &quot;attribute[???] == '???'&quot;" disabled>+where</button>
+    </div>
+    <button id="composerToggle" type="button" title="입력 숨기기" aria-label="입력 숨기기" aria-pressed="false">
+      <svg class="icon-minimize" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+        <path fill="currentColor" d="M3 7.5C3 7.22386 3.22386 7 3.5 7H12.5C12.7761 7 13 7.22386 13 7.5C13 7.77614 12.7761 8 12.5 8H3.5C3.22386 8 3 7.77614 3 7.5Z" />
+      </svg>
+      <svg class="icon-restore" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+        <path fill="currentColor" d="M5.08496 4C5.29088 3.4174 5.8465 3 6.49961 3H9.99961C11.6565 3 12.9996 4.34315 12.9996 6V9.5C12.9996 10.1531 12.5822 10.7087 11.9996 10.9146V6C11.9996 4.89543 11.1042 4 9.99961 4H5.08496ZM4.5 5H9.5C10.3284 5 11 5.67157 11 6.5V11.5C11 12.3284 10.3284 13 9.5 13H4.5C3.67157 13 3 12.3284 3 11.5V6.5C3 5.67157 3.67157 5 4.5 5ZM4.5 6C4.22386 6 4 6.22386 4 6.5V11.5C4 11.7761 4.22386 12 4.5 12H9.5C9.77614 12 10 11.7761 10 11.5V6.5C10 6.22386 9.77614 6 9.5 6H4.5Z" />
+      </svg>
+    </button>
+  </div>
+  <div id="composer">
+    <textarea id="command" disabled spellcheck="false" autocomplete="off"></textarea>
+    <div id="recall-split" title="너비 조절"></div>
+    <div id="recall">
+      <div id="recall-head">
+        <input id="recall-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="이력 필터" />
+        <button id="recall-clear" type="button" title="전체 지우기" aria-label="전체 지우기" disabled>전체</button>
+      </div>
+      <div id="recall-list"></div>
+    </div>
+  </div>
+  <div id="assist" role="listbox" hidden></div>
+  <div id="pick" role="menu" hidden>
+    <button type="button" role="menuitem">커서에 붙이기</button>
+  </div>
+  <div id="row-menu" role="menu" hidden>
+    <button type="button" role="menuitem" data-act="insert">입력</button>
+    <button type="button" role="menuitem" data-act="copy">복사</button>
+  </div>
+  <script src="{{js}}"></script>
+</body>
+</html>
