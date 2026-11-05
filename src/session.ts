@@ -1,10 +1,13 @@
-import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-const promptPattern = /^MQL<\d+>$/;
+const promptTailPattern = /(MQL<\d*>)\s*$/;
 const openDelayMs = 200;
 const promptDelayMs = 80;
 const immediateExitMs = 2000;
 const batchWaitMs = 20000;
+// 프롬프트로 응답 끝을 판단할 수 없을 때, 출력이 이 시간 동안 멈추면 응답이 끝난 것으로 본다.
+const quietMs = 1500;
+const startupLimit = 16384;
 
 export type MqlSessionEvents = {
   output: (text: string) => void;
@@ -16,7 +19,7 @@ export type MqlSessionEvents = {
   prompted: () => void;
 };
 
-type Pipe = 'out' | 'err';
+type Pipe = "out" | "err";
 
 export class MqlSession {
   private generation = 0;
@@ -25,21 +28,35 @@ export class MqlSession {
   private opened = false;
   private failed = false;
   private promptSeen = false;
+  private sent = false;
   private prompt: string | undefined;
   private hold = false;
-  private lines: Record<Pipe, string> = { out: '', err: '' };
-  private startup = '';
+  // 첫 프롬프트를 보기 전에 보낸 명령: 프롬프트만으로 끝을 판단할 수 없어 quiet 타이머로 마무리한다.
+  private holdEarly = false;
+  private parsing = false;
+  private promptWait = false;
+  private releaseWait = false;
+  private lines: Record<Pipe, string> = { out: "", err: "" };
+  private startup = "";
   private startedAt = 0;
   private openTimer: ReturnType<typeof setTimeout> | undefined;
   private trailTimer: ReturnType<typeof setTimeout> | undefined;
   private trailPipe: Pipe | undefined;
   private batchTimer: ReturnType<typeof setTimeout> | undefined;
-  private decoders: Record<Pipe, TextDecoder> = { out: new TextDecoder(), err: new TextDecoder() };
+  private quietTimer: ReturnType<typeof setTimeout> | undefined;
+  private decoders: Record<Pipe, TextDecoder> = {
+    out: new TextDecoder(),
+    err: new TextDecoder(),
+  };
 
   constructor(private readonly events: MqlSessionEvents) {}
 
   get running(): boolean {
     return this.active;
+  }
+
+  get prompted(): boolean {
+    return this.promptSeen;
   }
 
   start() {
@@ -50,18 +67,29 @@ export class MqlSession {
     this.opened = false;
     this.failed = false;
     this.promptSeen = false;
+    this.sent = false;
     this.prompt = undefined;
     this.hold = false;
-    this.lines = { out: '', err: '' };
+    this.holdEarly = false;
+    this.parsing = false;
+    this.promptWait = false;
+    this.releaseWait = false;
+    this.lines = { out: "", err: "" };
     this.trailPipe = undefined;
-    this.startup = '';
-    try {
-      const label = consoleEncoding();
-      this.decoders = { out: new TextDecoder(label), err: new TextDecoder(label) };
-    } catch {
-      this.decoders = { out: new TextDecoder(), err: new TextDecoder() };
-    }
-    void this.launch(generation);
+    this.startup = "";
+    // chcp 조회를 비동기(최초 1회 실행 후 캐시)로 처리해 확장 호스트가 멈추지 않게 한다.
+    void consoleEncoding().then((label) => {
+      if (generation !== this.generation) return;
+      try {
+        this.decoders = {
+          out: new TextDecoder(label),
+          err: new TextDecoder(label),
+        };
+      } catch {
+        this.decoders = { out: new TextDecoder(), err: new TextDecoder() };
+      }
+      this.launch(generation);
+    });
   }
 
   stop() {
@@ -75,30 +103,37 @@ export class MqlSession {
 
   canSend(): boolean {
     const stdin = this.proc?.stdin;
-    return !!stdin && stdin.writable && !stdin.destroyed && this.proc?.exitCode == null && !this.failed;
+    return (
+      !!stdin &&
+      stdin.writable &&
+      !stdin.destroyed &&
+      this.proc?.exitCode == null &&
+      !this.failed
+    );
   }
 
   send(text: string): boolean {
     if (!this.canSend()) return false;
+    this.sent = true;
     this.proc?.stdin?.write(`${text}\n`);
+    this.scheduleQuiet();
     return true;
   }
 
   arm(): boolean {
-    if (!this.prompt) return false;
+    if (!this.canSend()) return false;
     this.hold = true;
+    this.holdEarly = !this.promptSeen;
     return true;
   }
 
-  private async launch(generation: number) {
-    const batch = await mqlIsBatch();
-    if (generation !== this.generation) return;
+  private launch(generation: number) {
     let proc: ChildProcess;
     try {
-      proc = spawn('mql', [], {
+      proc = spawn("mql", [], {
         shell: true,
         windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ["pipe", "pipe", "pipe"],
       });
     } catch {
       this.fail(generation);
@@ -110,17 +145,22 @@ export class MqlSession {
     }
     this.proc = proc;
     this.startedAt = Date.now();
-    proc.on('error', () => this.fail(generation));
-    proc.on('exit', () => this.onExit(generation));
-    proc.stdout?.on('data', (chunk: Uint8Array) => this.onChunk(generation, chunk, 'out'));
-    proc.stderr?.on('data', (chunk: Uint8Array) => this.onChunk(generation, chunk, 'err'));
-    proc.stdin?.on('error', () => {});
-    if (batch) {
+    proc.on("error", () => this.fail(generation));
+    proc.on("exit", () => this.onExit(generation));
+    proc.stdout?.on("data", (chunk: Uint8Array) =>
+      this.onChunk(generation, chunk, "out"),
+    );
+    proc.stderr?.on("data", (chunk: Uint8Array) =>
+      this.onChunk(generation, chunk, "err"),
+    );
+    proc.stdin?.on("error", () => {});
+    void mqlIsBatch().then((batch) => {
+      if (!batch || generation !== this.generation || this.promptSeen) return;
       this.batchTimer = setTimeout(() => {
         if (generation !== this.generation || this.promptSeen) return;
         this.events.batch();
       }, batchWaitMs);
-    }
+    });
   }
 
   private onChunk(generation: number, chunk: Uint8Array, pipe: Pipe) {
@@ -131,7 +171,7 @@ export class MqlSession {
 
   private onExit(generation: number) {
     if (generation !== this.generation) return;
-    for (const pipe of ['out', 'err'] as const) {
+    for (const pipe of ["out", "err"] as const) {
       const rest = this.decoders[pipe].decode();
       if (rest) this.consume(rest, pipe);
     }
@@ -140,12 +180,14 @@ export class MqlSession {
     this.clearTimers();
     if (this.failed) return;
     const immediate = Date.now() - this.startedAt < immediateExitMs;
-    if (!this.promptSeen && immediate) {
+    if (!this.promptSeen && !this.sent && immediate) {
       this.failed = true;
       this.events.failed();
       return;
     }
-    const leftover = this.promptSeen ? undefined : this.startup.trim() || undefined;
+    const leftover = this.promptSeen
+      ? undefined
+      : this.startup.trim() || undefined;
     this.events.ended(leftover);
   }
 
@@ -162,18 +204,37 @@ export class MqlSession {
   }
 
   private consume(text: string, pipe: Pipe) {
-    if (!this.promptSeen) this.startup += text;
+    if (!this.promptSeen) {
+      // 프롬프트가 없는 환경에서 무한히 쌓이지 않도록 끝부분만 유지한다(종료 안내용).
+      this.startup += text;
+      if (this.startup.length > startupLimit) this.startup = this.startup.slice(-startupLimit);
+    }
     this.events.output(text);
     this.scheduleOpen();
+    this.scheduleQuiet();
+    const nested = this.parsing;
+    const generation = this.generation;
+    this.parsing = true;
     for (const char of text) {
-      if (char === '\n' || char === '\r') {
+      if (char === "\n" || char === "\r") {
         const finished = this.lines[pipe];
-        this.lines[pipe] = '';
-        this.finishLine(finished, pipe);
+        this.lines[pipe] = "";
+        if (finished) this.finishLine(finished, pipe);
       } else {
         this.lines[pipe] += char;
-        if (this.lines[pipe].length <= 32) this.scheduleTrailing(pipe);
       }
+    }
+    if (this.lines[pipe]) this.scheduleTrailing(pipe);
+    this.parsing = nested;
+    if (nested || generation !== this.generation) return;
+    if (this.promptWait) {
+      this.promptWait = false;
+      this.events.prompted();
+      this.open();
+    }
+    if (this.releaseWait && generation === this.generation) {
+      this.releaseWait = false;
+      this.events.released();
     }
   }
 
@@ -194,8 +255,8 @@ export class MqlSession {
   }
 
   private scheduleTrailing(pipe: Pipe) {
-    const candidate = this.lines[pipe].trim();
-    if (!promptPattern.test(candidate)) return;
+    const candidate = matchPrompt(this.lines[pipe]);
+    if (!candidate) return;
     if (this.trailTimer) clearTimeout(this.trailTimer);
     this.trailTimer = undefined;
     this.trailPipe = pipe;
@@ -204,7 +265,7 @@ export class MqlSession {
       this.trailTimer = undefined;
       this.trailPipe = undefined;
       if (generation !== this.generation) return;
-      if (this.lines[pipe].trim() !== candidate) return;
+      if (matchPrompt(this.lines[pipe]) !== candidate) return;
       this.accept(candidate, pipe);
     }, promptDelayMs);
   }
@@ -215,21 +276,26 @@ export class MqlSession {
       this.trailTimer = undefined;
       this.trailPipe = undefined;
     }
-    const candidate = raw.trim();
-    if (!promptPattern.test(candidate)) return;
+    const candidate = matchPrompt(raw);
+    if (!candidate) return;
     this.accept(candidate, pipe);
   }
 
   private accept(candidate: string, pipe: Pipe) {
-    if (!promptPattern.test(candidate)) return;
-    if (this.lines[pipe].trim() === candidate) this.lines[pipe] = '';
+    if (matchPrompt(this.lines[pipe]) === candidate) this.lines[pipe] = "";
     if (!this.promptSeen) {
       this.prompt = candidate;
       this.promptSeen = true;
       if (this.batchTimer) clearTimeout(this.batchTimer);
       this.batchTimer = undefined;
-      this.events.prompted();
-      this.open();
+      if (this.parsing) this.promptWait = true;
+      else {
+        this.events.prompted();
+        this.open();
+      }
+      // 명령을 첫 프롬프트보다 먼저 보냈다면 이 프롬프트는 시작 프롬프트일 수도, 응답 끝일 수도 있다.
+      // 다음 프롬프트를 기다리되, 더 이상 출력이 없으면 quiet 타이머가 마무리한다.
+      if (this.hold && !this.holdEarly) this.release();
       return;
     }
     if (!this.hold) {
@@ -237,14 +303,38 @@ export class MqlSession {
       return;
     }
     this.prompt = candidate;
+    this.release();
+  }
+
+  private release() {
+    if (!this.hold) return;
     this.hold = false;
-    this.events.released();
+    this.holdEarly = false;
+    if (this.quietTimer) clearTimeout(this.quietTimer);
+    this.quietTimer = undefined;
+    if (this.parsing) this.releaseWait = true;
+    else this.events.released();
+  }
+
+  private scheduleQuiet() {
+    if (this.quietTimer) clearTimeout(this.quietTimer);
+    this.quietTimer = undefined;
+    // 프롬프트 규칙이 확립된 뒤의 정상 hold는 프롬프트만으로 판단한다.
+    if (!this.hold || (this.promptSeen && !this.holdEarly)) return;
+    const generation = this.generation;
+    this.quietTimer = setTimeout(() => {
+      this.quietTimer = undefined;
+      if (generation !== this.generation) return;
+      this.release();
+    }, quietMs);
   }
 
   private clearTimers() {
     if (this.openTimer) clearTimeout(this.openTimer);
     if (this.trailTimer) clearTimeout(this.trailTimer);
     if (this.batchTimer) clearTimeout(this.batchTimer);
+    if (this.quietTimer) clearTimeout(this.quietTimer);
+    this.quietTimer = undefined;
     this.openTimer = undefined;
     this.trailTimer = undefined;
     this.trailPipe = undefined;
@@ -252,23 +342,35 @@ export class MqlSession {
   }
 }
 
-function consoleEncoding(): string {
-  try {
-    const output = execFileSync('cmd.exe', ['/d', '/c', 'chcp'], {
-      windowsHide: true,
-      encoding: 'utf8',
-    });
-    const code = output.match(/(\d+)/)?.[1];
-    if (code === '949') return 'euc-kr';
-  } catch {
-    return 'utf-8';
-  }
-  return 'utf-8';
+function matchPrompt(raw: string): string | undefined {
+  const tail = raw.length > 32 ? raw.slice(-32) : raw;
+  return promptTailPattern.exec(tail)?.[1];
+}
+
+let encodingLookup: Promise<string> | undefined;
+
+function consoleEncoding(): Promise<string> {
+  encodingLookup ??= new Promise((resolve) => {
+    execFile(
+      "cmd.exe",
+      ["/d", "/c", "chcp"],
+      { windowsHide: true },
+      (error, stdout) => {
+        if (error) {
+          resolve("utf-8");
+          return;
+        }
+        const code = String(stdout).match(/(\d+)/)?.[1];
+        resolve(code === "949" ? "euc-kr" : "utf-8");
+      },
+    );
+  });
+  return encodingLookup;
 }
 
 function mqlIsBatch(): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile('where.exe', ['mql'], { windowsHide: true }, (error, stdout) => {
+    execFile("where.exe", ["mql"], { windowsHide: true }, (error, stdout) => {
       if (error) {
         resolve(false);
         return;
@@ -283,11 +385,11 @@ function mqlIsBatch(): Promise<boolean> {
 
 function killTree(proc: ChildProcess | undefined) {
   if (!proc?.pid) return;
-  const killer = spawn('taskkill', ['/pid', String(proc.pid), '/t', '/f'], {
+  const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
     windowsHide: true,
-    stdio: 'ignore',
+    stdio: "ignore",
   });
-  killer.on('error', () => {
+  killer.on("error", () => {
     if (!proc.killed) proc.kill();
   });
 }

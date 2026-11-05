@@ -2,19 +2,27 @@ const vscode = acquireVsCodeApi();
 const history = document.getElementById('history');
 const statusNode = document.getElementById('status');
 const statusText = document.getElementById('status-text');
+const txNode = document.getElementById('tx');
+const txCommit = document.getElementById('tx-commit');
+const txAbort = document.getElementById('tx-abort');
 const clearButton = document.getElementById('clear');
 const restartButton = document.getElementById('restart');
 const clearBar = document.querySelector('.bar');
 const split = document.getElementById('split');
 const runButton = document.getElementById('run');
 const commandClear = document.getElementById('commandClear');
+const composerGear = document.getElementById('composerGear');
+const composerMenu = document.getElementById('composer-menu');
+const lineNumbersItem = document.getElementById('line-numbers');
 const composerToggle = document.getElementById('composerToggle');
 const snippetButtons = document.querySelectorAll('#snippets button');
 const jpo = document.getElementById('jpo');
 const jpoToggle = document.getElementById('jpoToggle');
 const jpoPath = document.getElementById('jpoPath');
+const jpoBrowse = document.getElementById('jpoBrowse');
 const jpoRun = document.getElementById('jpoRun');
 const composer = document.getElementById('composer');
+const gutter = document.getElementById('gutter');
 const command = document.getElementById('command');
 const recall = document.getElementById('recall');
 const recallSplit = document.getElementById('recall-split');
@@ -37,11 +45,13 @@ const railHelp = document.getElementById('rail-help');
 const railList = document.getElementById('rail-list');
 const drawer = document.getElementById('drawer');
 const drawerSplit = document.getElementById('drawer-split');
+const helpTopic = document.getElementById('help-topic');
 const helpFind = document.getElementById('help-find');
 const helpView = document.getElementById('help-view');
 const listKind = document.getElementById('list-kind');
 const listFilter = document.getElementById('list-filter');
 const listView = document.getElementById('list-view');
+const drawerNote = document.getElementById('drawer-note');
 const drawerRefresh = document.getElementById('drawer-refresh');
 const drawerClose = document.getElementById('drawer-close');
 const drawerWide = document.getElementById('drawer-wide');
@@ -72,6 +82,10 @@ const phrases = [
   'print command',
   'print menu',
   'print form',
+  'print table system',
+  'print channel',
+  'print portal',
+  'print page',
   'print context;',
   'list type',
   'list person',
@@ -86,16 +100,25 @@ const phrases = [
   'list command',
   'list menu',
   'list form',
+  'list table',
+  'list channel',
+  'list portal',
+  'list page',
   'add bus',
   'modify bus',
   'delete bus',
   'expand bus * * *',
+  'expand bus * * * recurse to all select bus id current',
   'connect bus',
   'disconnect bus',
   'promote bus',
   'demote bus',
+  'add property on program eServiceSchemaVariableMapping.tcl to',
   'set context user creator;',
+  'verb on;',
+  'verb off;',
   'insert prog',
+  'compile prog',
   'start transaction;',
   'commit transaction;',
   'abort transaction;',
@@ -104,22 +127,28 @@ const phrases = [
   'quit;',
   'exit;',
 ];
+const schemaCache = new Map();
+let txActive = false;
 let assistIndex = 0;
 let assistMatches = [];
 let pickText = '';
 let drawerLane = '';
 let helpRaw = '';
 let helpQuery = '';
-let helpFetched = false;
+let helpFetchedTopic = null;
+let sentHelpTopic = '';
 let listRaw = '';
 let listCut = 0;
 let listFetchedKind = '';
 let sentKind = 'type';
 let sideBusy = false;
+let sideHold = false;
 let sideStarted = false;
+let queuedSide = null;
 let activeToken = 0;
 let sideToken = 0;
 let pendingLane = '';
+let runningId = null;
 let rowMenuText = '';
 let hydrated = false;
 let splitRatio = 0.6;
@@ -130,8 +159,15 @@ function follow() {
   history.scrollTop = history.scrollHeight;
 }
 
+function placeCommandClear() {
+  const bar = Math.max(0, command.offsetWidth - command.clientWidth);
+  commandClear.style.right = (bar + 6) + 'px';
+}
+
 function syncCommandClear() {
   commandClear.disabled = command.disabled || command.value === '';
+  placeCommandClear();
+  syncGutter();
 }
 
 function clearCommand() {
@@ -143,14 +179,41 @@ function clearCommand() {
   savePrefs();
 }
 
+function syncTx() {
+  const busy = sideBusy || history.querySelector('.block.pending') !== null;
+  txNode.hidden = !txActive;
+  txCommit.disabled = command.disabled || busy;
+  txAbort.disabled = command.disabled || busy;
+}
+
+function updateTxFromCommand(cmd, hasErr = false) {
+  if (hasErr) return;
+  const norm = cmd.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (/^start transaction(\s+(read|write))?\s*;$/.test(norm)) {
+    txActive = true;
+    syncTx();
+  } else if (/^(commit|abort) transaction\s*;$/.test(norm)) {
+    txActive = false;
+    syncTx();
+  }
+}
+
+function recomputeTx(blocks) {
+  txActive = false;
+  for (const block of blocks) {
+    updateTxFromCommand(block.command, hasErrorLine(cleanResult(block.result || '')));
+  }
+  syncTx();
+}
+
 function syncStatus() {
-  const hasBlocks = history.querySelector('.block') !== null;
   const hasNotices = history.querySelector('.notice') !== null;
-  const blockRunning = !command.disabled && clearButton.disabled && hasBlocks;
+  const blockRunning = history.querySelector('.block.pending') !== null;
   const busy = sideBusy || blockRunning;
   for (const button of history.querySelectorAll('.block-rerun')) {
     button.disabled = command.disabled || busy;
   }
+  syncTx();
   if (busy) {
     statusNode.dataset.state = 'running';
     statusText.textContent = '실행 중';
@@ -177,6 +240,8 @@ function setInputEnabled(enabled) {
   for (const button of snippetButtons) button.disabled = !enabled;
   jpoToggle.disabled = !enabled;
   jpoPath.disabled = !enabled;
+  jpoBrowse.disabled = !enabled;
+  if (enabled || !sideBusy) sideHold = false;
   syncCommandClear();
   syncJpoPath();
   syncDrawerControls();
@@ -184,15 +249,14 @@ function setInputEnabled(enabled) {
   if (!enabled) closeAssist();
   if (enabled && !wasEnabled) {
     const active = document.activeElement;
-    if (active !== helpFind && active !== listFilter && active !== listKind) command.focus();
-    fetchDrawerIfEmpty();
+    if (active !== helpTopic && active !== helpFind && active !== listFilter && active !== listKind) command.focus();
   }
+  if (enabled) flushQueuedSide();
 }
 
 function setClearEnabled(enabled) {
   clearButton.disabled = !enabled;
   syncStatus();
-  if (enabled) fetchDrawerIfEmpty();
 }
 
 function noticeNode(text) {
@@ -204,9 +268,9 @@ function noticeNode(text) {
 
 function foldIcon() {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 16 16');
-  svg.setAttribute('width', '12');
-  svg.setAttribute('height', '12');
+  svg.setAttribute('viewBox', '3.8 4.7 8.4 5.6');
+  svg.setAttribute('width', '16');
+  svg.setAttribute('height', '16');
   svg.setAttribute('aria-hidden', 'true');
   const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   path.setAttribute('fill', 'currentColor');
@@ -348,7 +412,7 @@ function cleanResult(raw) {
 }
 
 function hasErrorLine(text) {
-  return /(?:^|\n)\s*(?:Error:|System Error:|#\d+\s*:\s*Error)/i.test(text);
+  return /(?:^|\n)\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/i.test(text);
 }
 
 function paintResult(node, raw) {
@@ -368,14 +432,14 @@ function paintResult(node, raw) {
   for (let i = 0; i < lines.length; i += 1) {
     if (i > 0) frag.append(document.createTextNode('\n'));
     const line = lines[i];
-    if (/^\s*(?:Error:|System Error:|#\d+\s*:\s*Error)/i.test(line)) {
+    if (/^\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/i.test(line)) {
       const span = document.createElement('span');
       span.className = 'res-err';
       span.textContent = line;
       frag.append(span);
       continue;
     }
-    if (/^\s*(?:Warning:|#\d+\s*:\s*Warning)/i.test(line)) {
+    if (/^\s*(?:Warning\s*:|#\d+\s*:\s*Warning\b)/i.test(line)) {
       const span = document.createElement('span');
       span.className = 'res-warn';
       span.textContent = line;
@@ -480,6 +544,82 @@ function moveFind(step) {
   syncFind(true);
 }
 
+const paintQueue = new Set();
+let paintFrame = 0;
+let paintTimer = 0;
+let paintCost = 0;
+
+function queuePaint(id) {
+  paintQueue.add(String(id));
+  if (paintFrame || paintTimer) return;
+  // 직전 그리기에 걸린 시간의 4배만큼 쉬어서 대용량 출력 중에도 UI가 응답하도록 한다.
+  const wait = Math.min(1000, paintCost * 4);
+  if (wait > 16) paintTimer = setTimeout(() => {
+    paintTimer = 0;
+    paintFrame = requestAnimationFrame(flushPaint);
+  }, wait);
+  else paintFrame = requestAnimationFrame(flushPaint);
+}
+
+function cancelPaint() {
+  if (paintFrame) cancelAnimationFrame(paintFrame);
+  if (paintTimer) clearTimeout(paintTimer);
+  paintFrame = 0;
+  paintTimer = 0;
+  paintQueue.clear();
+}
+
+function flushPaint() {
+  if (paintFrame) cancelAnimationFrame(paintFrame);
+  if (paintTimer) clearTimeout(paintTimer);
+  paintFrame = 0;
+  paintTimer = 0;
+  if (paintQueue.size === 0) return;
+  const started = performance.now();
+  for (const id of paintQueue) {
+    const stored = blockText.get(id);
+    const result = findResult(id);
+    if (stored && result) paintResult(result, stored.result);
+  }
+  paintQueue.clear();
+  if (findQuery) syncFind(false);
+  follow();
+  paintCost = performance.now() - started;
+}
+
+function recomputeAllTx() {
+  const blocks = [];
+  for (const item of history.querySelectorAll('.block')) {
+    const b = blockText.get(item.dataset.id);
+    if (b) blocks.push(b);
+  }
+  recomputeTx(blocks);
+}
+
+function settleBlock(id) {
+  if (String(runningId) === String(id)) runningId = null;
+  const item = blockById(String(id));
+  if (!item) {
+    syncStatus();
+    return;
+  }
+  item.classList.remove('pending');
+  item.removeAttribute('aria-busy');
+  syncStatus();
+}
+
+function waitNode() {
+  const wait = document.createElement('div');
+  wait.className = 'block-wait';
+  const spin = document.createElement('span');
+  spin.className = 'spinner';
+  spin.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.textContent = '응답 대기';
+  wait.append(spin, label);
+  return wait;
+}
+
 function blockNode(block) {
   const id = String(block.id);
   const commandText = block.command;
@@ -488,6 +628,10 @@ function blockNode(block) {
   const item = document.createElement('div');
   item.className = 'block';
   item.dataset.id = id;
+  if (runningId != null && String(runningId) === id) {
+    item.classList.add('pending');
+    item.setAttribute('aria-busy', 'true');
+  }
   const folded = collapsed.has(id);
   if (folded) item.classList.add('collapsed');
   const head = document.createElement('div');
@@ -500,9 +644,6 @@ function blockNode(block) {
   fold.setAttribute('aria-label', label);
   fold.setAttribute('aria-expanded', folded ? 'false' : 'true');
   fold.append(foldIcon());
-  const badge = document.createElement('span');
-  badge.className = 'block-badge';
-  badge.textContent = `#${id}`;
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'command';
@@ -525,13 +666,14 @@ function blockNode(block) {
   actions.append(copyBtn, rerunBtn);
   const result = document.createElement('pre');
   result.className = 'result';
-  head.append(fold, badge, button, actions);
-  item.append(head, result);
+  head.append(fold, button, actions);
+  item.append(head, result, waitNode());
   paintResult(result, resultRaw);
   return item;
 }
 
 function render(state) {
+  if ('runningId' in state) runningId = state.runningId == null ? null : state.runningId;
   if (!hydrated && state.prefs) hydratePrefs(state.prefs);
   const nodes = [];
   for (const notice of state.notices) nodes.push(noticeNode(notice));
@@ -540,6 +682,7 @@ function render(state) {
   pruneBlockState();
   ensureRecall(state.blocks);
   markRecall();
+  recomputeTx(state.blocks);
   setInputEnabled(state.inputEnabled);
   setClearEnabled(state.clearEnabled);
   follow();
@@ -573,6 +716,7 @@ function savePrefs() {
       composerHidden: document.body.classList.contains('composer-hidden'),
       historyHidden: document.body.classList.contains('history-hidden'),
       drawerLane: open ? drawerLane : '',
+      helpTopic: helpTopic.value,
       listKind: listKind.value,
     },
   });
@@ -592,6 +736,14 @@ function hydratePrefs(prefs) {
   if (prefs.historyHidden) {
     document.body.classList.add('history-hidden');
     syncHistory();
+  }
+  if (typeof prefs.helpTopic === 'string') {
+    for (const option of helpTopic.options) {
+      if (option.value === prefs.helpTopic) {
+        helpTopic.value = prefs.helpTopic;
+        break;
+      }
+    }
   }
   if (typeof prefs.listKind === 'string' && prefs.listKind) {
     listKind.value = prefs.listKind;
@@ -613,6 +765,7 @@ function hydratePrefs(prefs) {
     syncRecallClear();
   }
   hydrated = true;
+  syncFieldClears();
 }
 
 function recallIcon(d) {
@@ -856,6 +1009,10 @@ const MQL_STARTERS = new Set([
   'unlock',
   'checkin',
   'checkout',
+  'verb',
+  'verbose',
+  'mod',
+  'del',
 ]);
 
 const MQL_HEADER_TARGETS = new Set([
@@ -1016,15 +1173,87 @@ function minHeaderLength(words) {
   const w2 = words[2]?.value.toLowerCase() || '';
   if (w0 === 'temp' && w1 === 'query' && (w2 === 'bus' || w2 === 'businessobject')) return Math.min(words.length, 6);
   if (w0 === 'query' && (w1 === 'bus' || w1 === 'businessobject')) return Math.min(words.length, 5);
-  if ((w0 === 'print' || w0 === 'expand' || w0 === 'modify' || w0 === 'add' || w0 === 'delete' || w0 === 'promote' || w0 === 'demote' || w0 === 'connect' || w0 === 'disconnect') && (w1 === 'bus' || w1 === 'businessobject')) {
+  if ((w0 === 'print' || w0 === 'expand' || w0 === 'modify' || w0 === 'mod' || w0 === 'add' || w0 === 'delete' || w0 === 'del' || w0 === 'promote' || w0 === 'demote' || w0 === 'connect' || w0 === 'disconnect') && (w1 === 'bus' || w1 === 'businessobject')) {
     if (words[2] && /^[0-9]+(\.[0-9]+)+$/.test(words[2].value)) return 3;
     return Math.min(words.length, 5);
   }
-  if ((w0 === 'print' || w0 === 'list' || w0 === 'modify' || w0 === 'add' || w0 === 'delete') && MQL_HEADER_TARGETS.has(w1)) {
+  if ((w0 === 'print' || w0 === 'list' || w0 === 'modify' || w0 === 'mod' || w0 === 'add' || w0 === 'delete' || w0 === 'del') && MQL_HEADER_TARGETS.has(w1)) {
+    if ((w1 === 'form' || w1 === 'table') && words[3] && /^(web|system)$/i.test(words[3].value)) {
+      return Math.min(words.length, 4);
+    }
     return Math.min(words.length, w1 === 'context' ? 2 : 3);
   }
   return 1;
 }
+
+const DDL_L1_BREAKS = new Set([
+  'description',
+  'type',
+  'sequence',
+  'store',
+  'format',
+  'defaultformat',
+  'state',
+  'allstate',
+  'from',
+  'to',
+  'field',
+  'column',
+  'abstract',
+  'derived',
+  'attribute',
+  'default',
+  'multiline',
+  'notmultiline',
+  'hidden',
+  'nothidden',
+  'range',
+  'trigger',
+  'property',
+  'setting',
+  'command',
+  'menu',
+  'channel',
+  'href',
+  'alt',
+  'height',
+]);
+
+const DDL_STATE_SUBS = new Set([
+  'revision',
+  'version',
+  'promote',
+  'checkouthistory',
+  'public',
+  'owner',
+  'user',
+  'filter',
+  'action',
+  'check',
+  'trigger',
+  'signature',
+  'route',
+]);
+
+const DDL_REL_SUBS = new Set([
+  'cardinality',
+  'revision',
+  'clone',
+  'propagate',
+  'meaning',
+]);
+
+const DDL_FIELD_SUBS = new Set([
+  'name',
+  'label',
+  'businessobject',
+  'relationship',
+  'range',
+  'href',
+  'alt',
+  'sorttype',
+  'update',
+]);
 
 function isClauseBreak(words, idx, headerEnd) {
   if (idx < headerEnd) return false;
@@ -1043,8 +1272,13 @@ function isClauseBreak(words, idx, headerEnd) {
   if ((w0 === 'temp' || w0 === 'query') && (lower === 'vault' || lower === 'owner')) {
     return true;
   }
-  if ((w0 === 'modify' || w0 === 'add') && (w1 === 'bus' || w1 === 'businessobject') && (lower === 'description' || lower === 'policy' || lower === 'vault' || lower === 'owner' || lower === 'current')) {
+  if ((w0 === 'modify' || w0 === 'mod' || w0 === 'add') && (w1 === 'bus' || w1 === 'businessobject') && (lower === 'description' || lower === 'policy' || lower === 'vault' || lower === 'owner' || lower === 'current' || lower === 'state')) {
     return true;
+  }
+  if ((w0 === 'add' || w0 === 'modify' || w0 === 'mod') && MQL_HEADER_TARGETS.has(w1) && w1 !== 'bus' && w1 !== 'businessobject') {
+    if (prev === 'add' || prev === 'remove' || prev === 'modify' || prev === 'mod') return false;
+    if (lower === 'add' || lower === 'remove') return true;
+    if (DDL_L1_BREAKS.has(lower) || DDL_STATE_SUBS.has(lower) || DDL_REL_SUBS.has(lower) || DDL_FIELD_SUBS.has(lower)) return true;
   }
   return false;
 }
@@ -1052,9 +1286,30 @@ function isClauseBreak(words, idx, headerEnd) {
 function formatSingleStatement(words) {
   if (words.length === 0) return '';
   const headerEnd = minHeaderLength(words);
+  const w0 = words[0].value.toLowerCase();
+  const w1 = words[1]?.value.toLowerCase() || '';
+  const isSchemaDdl = (w0 === 'add' || w0 === 'modify' || w0 === 'mod') && MQL_HEADER_TARGETS.has(w1) && w1 !== 'bus' && w1 !== 'businessobject';
   const lines = [];
   let currentLine = [];
+  let currentIndent = '';
+  let section = '';
   let inSelect = false;
+
+  const indentFor = (lower) => {
+    if (!isSchemaDdl) return '  ';
+    if (lower === 'state' || lower === 'allstate' || lower === 'from' || lower === 'to' || lower === 'field' || lower === 'column') {
+      section = lower;
+      return '  ';
+    }
+    if ((section === 'state' || section === 'allstate') && (DDL_STATE_SUBS.has(lower) || lower === 'property')) return '    ';
+    if ((section === 'from' || section === 'to') && (DDL_REL_SUBS.has(lower) || lower === 'type' || lower === 'relationship')) return '    ';
+    if ((section === 'field' || section === 'column') && (DDL_FIELD_SUBS.has(lower) || lower === 'setting' || lower === 'user')) return '    ';
+    if (DDL_L1_BREAKS.has(lower)) {
+      section = '';
+      return '  ';
+    }
+    return section ? '    ' : '  ';
+  };
 
   for (let i = 0; i < words.length; i += 1) {
     const word = words[i].value;
@@ -1062,8 +1317,9 @@ function formatSingleStatement(words) {
     const shouldBreak = isClauseBreak(words, i, headerEnd) && !(inSelect && lower !== 'where' && lower !== 'dump' && lower !== 'recordsep' && lower !== 'tcl' && lower !== 'output' && lower !== 'orderby' && lower !== 'limit');
 
     if (shouldBreak && currentLine.length > 0) {
-      lines.push(lines.length === 0 ? currentLine.join(' ') : '  ' + currentLine.join(' '));
+      lines.push(lines.length === 0 ? currentLine.join(' ') : currentIndent + currentLine.join(' '));
       currentLine = [];
+      currentIndent = indentFor(lower);
       inSelect = lower === 'select';
     } else if (i >= headerEnd && lower === 'select') {
       inSelect = true;
@@ -1073,7 +1329,7 @@ function formatSingleStatement(words) {
   }
 
   if (currentLine.length > 0) {
-    lines.push(lines.length === 0 ? currentLine.join(' ') : '  ' + currentLine.join(' '));
+    lines.push(lines.length === 0 ? currentLine.join(' ') : currentIndent + currentLine.join(' '));
   }
 
   const joined = lines.join('\n');
@@ -1120,20 +1376,139 @@ function formatCommand() {
   savePrefs();
 }
 
-function statementAt(text, cursor) {
-  const statements = splitMqlStatements(text);
-  if (statements.length === 0) return '';
-  for (const stmt of statements) {
-    if (cursor >= stmt.start && cursor <= stmt.end) {
-      return flattenStatement(stmt.words);
+function applyJoin(text, selStart, selEnd) {
+  const lines = text.split('\n');
+  const lineStarts = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
+  }
+  const posAt = (index) => {
+    let line = 0;
+    for (let i = 1; i < lineStarts.length; i += 1) {
+      if (lineStarts[i] <= index) line = i;
+      else break;
     }
+    return { line: line + 1, column: index - lineStarts[line] + 1 };
+  };
+  const startPos = posAt(selStart);
+  const endPos = posAt(selEnd);
+  const isEmpty = selStart === selEnd;
+  const startLineNumber = startPos.line;
+  let endLineNumber;
+  if (isEmpty || startPos.line === endPos.line) {
+    endLineNumber = startLineNumber < lines.length ? startLineNumber + 1 : startLineNumber;
+  } else {
+    endLineNumber = endPos.line;
+  }
+  const selectionEndOffset = lines[endPos.line - 1].length - endPos.column;
+  let trimmed = lines[startLineNumber - 1];
+  let columnDeltaOffset = 0;
+  for (let i = startLineNumber + 1; i <= endLineNumber; i += 1) {
+    const lineText = lines[i - 1];
+    const contentAt = lineText.search(/\S/);
+    if (contentAt >= 0) {
+      let insertSpace = trimmed !== '';
+      if (insertSpace && (trimmed.charAt(trimmed.length - 1) === ' ' || trimmed.charAt(trimmed.length - 1) === '\t')) {
+        insertSpace = false;
+        trimmed = trimmed.replace(/[\s\uFEFF\xA0]+$/g, ' ');
+      }
+      const lineTextWithoutIndent = lineText.substring(contentAt);
+      trimmed += (insertSpace ? ' ' : '') + lineTextWithoutIndent;
+      columnDeltaOffset = lineTextWithoutIndent.length + (insertSpace ? 1 : 0);
+    } else {
+      columnDeltaOffset = 0;
+    }
+  }
+  const replaceFrom = lineStarts[startLineNumber - 1];
+  const replaceTo = lineStarts[endLineNumber - 1] + lines[endLineNumber - 1].length;
+  if (replaceFrom === replaceTo) return null;
+  const next = text.slice(0, replaceFrom) + trimmed + text.slice(replaceTo);
+  let newStart;
+  let newEnd;
+  if (isEmpty) {
+    newStart = replaceFrom + trimmed.length - columnDeltaOffset;
+    newEnd = newStart;
+  } else if (startPos.line === endPos.line) {
+    newStart = replaceFrom + startPos.column - 1;
+    newEnd = replaceFrom + endPos.column - 1;
+  } else {
+    newStart = replaceFrom + startPos.column - 1;
+    newEnd = replaceFrom + trimmed.length - selectionEndOffset - 1;
+  }
+  const clamp = (index) => Math.min(Math.max(0, index), next.length);
+  newStart = clamp(newStart);
+  newEnd = clamp(newEnd);
+  if (newStart > newEnd) {
+    const swap = newStart;
+    newStart = newEnd;
+    newEnd = swap;
+  }
+  if (next === text && newStart === selStart && newEnd === selEnd) return null;
+  return { text: next, start: newStart, end: newEnd, from: replaceFrom, to: replaceTo, insert: trimmed };
+}
+
+function joinLines() {
+  if (command.disabled || isOtherInput(document.activeElement)) return;
+  const value = command.value;
+  const start = command.selectionStart ?? 0;
+  const end = command.selectionEnd ?? start;
+  const joined = applyJoin(value, start, end);
+  if (!joined) return;
+  closeAssist();
+  if (joined.text !== value) {
+    command.focus();
+    command.setSelectionRange(joined.from, joined.to);
+    const inserted = document.execCommand('insertText', false, joined.insert);
+    const at = command.value.slice(joined.from, joined.from + joined.insert.length);
+    if (!inserted || at !== joined.insert) command.value = joined.text;
+  }
+  command.setSelectionRange(joined.start, joined.end);
+  syncCommandClear();
+  command.focus();
+  savePrefs();
+}
+
+function statementSpanAt(text, cursor) {
+  const statements = splitMqlStatements(text);
+  if (statements.length === 0) return null;
+  for (const stmt of statements) {
+    if (cursor >= stmt.start && cursor <= stmt.end) return stmt;
   }
   let chosen = statements[0];
   for (const stmt of statements) {
     if (stmt.start <= cursor) chosen = stmt;
     else break;
   }
-  return flattenStatement(chosen.words);
+  return chosen;
+}
+
+function statementAt(text, cursor) {
+  const stmt = statementSpanAt(text, cursor);
+  if (!stmt) return '';
+  return flattenStatement(stmt.words);
+}
+
+function ensureStatementSemicolon() {
+  const text = command.value;
+  const stmt = statementSpanAt(text, caretOffset());
+  if (!stmt || text[stmt.end - 1] === ';') return;
+  const index = stmt.end;
+  const start = command.selectionStart ?? 0;
+  const end = command.selectionEnd ?? start;
+  const shift = (pos) => (pos >= index ? pos + 1 : pos);
+  command.focus();
+  command.setSelectionRange(index, index);
+  const inserted = document.execCommand('insertText', false, ';');
+  if (inserted && command.value[index] === ';') {
+    command.setSelectionRange(shift(start), shift(end));
+    return;
+  }
+  command.value = text.slice(0, index) + ';' + text.slice(index);
+  command.setSelectionRange(shift(start), shift(end));
+  syncCommandClear();
+  savePrefs();
 }
 
 function statementAtCursor() {
@@ -1143,6 +1518,7 @@ function statementAtCursor() {
 function runStatement() {
   closeAssist();
   if (command.disabled) return;
+  ensureStatementSemicolon();
   const text = statementAtCursor();
   if (!text) return;
   vscode.postMessage({ type: 'send', text });
@@ -1179,31 +1555,60 @@ function runJpo() {
   vscode.postMessage({ type: 'send', text });
 }
 
+function lineAt(value, caret) {
+  const lineStart = caret === 0 ? 0 : value.lastIndexOf('\n', caret - 1) + 1;
+  const lineEndIdx = value.indexOf('\n', caret);
+  return { lineStart, lineEnd: lineEndIdx === -1 ? value.length : lineEndIdx };
+}
+
 function insertStatement(text) {
   if (command.disabled) return;
-  const current = command.value;
-  command.value = current.trim() === '' ? text : current.replace(/\s*$/, '') + '\n' + text;
-  const caret = command.value.length;
-  command.selectionStart = caret;
-  command.selectionEnd = caret;
+  const value = command.value;
+  if (value.trim() === '') {
+    command.value = text;
+    command.selectionStart = text.length;
+    command.selectionEnd = text.length;
+    syncCommandClear();
+    command.focus();
+    savePrefs();
+    return;
+  }
+  const caret = caretOffset();
+  const { lineStart, lineEnd } = lineAt(value, caret);
+  const prefix = value.slice(lineStart, caret).trim() !== '' ? '\n' : '';
+  const suffix = value.slice(caret, lineEnd).trim() !== '' ? '\n' : '';
+  command.value = value.slice(0, caret) + prefix + text + suffix + value.slice(caret);
+  const next = caret + prefix.length + text.length;
+  command.selectionStart = next;
+  command.selectionEnd = next;
   syncCommandClear();
   command.focus();
   savePrefs();
 }
 
+function clauseInsertAt(value, caret) {
+  const { lineStart, lineEnd } = lineAt(value, caret);
+  const line = value.slice(lineStart, lineEnd);
+  const trimmedRight = line.replace(/\s+$/, '');
+  if (!trimmedRight.endsWith(';')) return caret;
+  const semi = lineStart + trimmedRight.length - 1;
+  if (caret >= semi && caret <= lineEnd) return semi;
+  if (/^\s*$/.test(line.slice(caret - lineStart, trimmedRight.length - 1))) return semi;
+  return caret;
+}
+
 function appendClause(text, pick) {
   if (command.disabled) return;
   const value = command.value;
-  const trimmed = value.replace(/\s+$/, '');
-  const cut = trimmed.endsWith(';') ? trimmed.length - 1 : trimmed.length;
-  const head = value.slice(0, cut);
-  const tail = value.slice(cut);
+  const at = clauseInsertAt(value, caretOffset());
+  const head = value.slice(0, at);
+  const tail = value.slice(at);
   const gap = head.length > 0 && !/\s$/.test(head) ? ' ' : '';
   const insertedAt = head.length + gap.length;
   command.value = head + gap + text + tail;
-  const at = pick ? text.indexOf(pick) : -1;
-  const start = insertedAt + (at === -1 ? text.length : at);
-  const end = at === -1 ? start : start + pick.length;
+  const mark = pick ? text.indexOf(pick) : -1;
+  const start = insertedAt + (mark === -1 ? text.length : mark);
+  const end = mark === -1 ? start : start + pick.length;
   command.selectionStart = start;
   command.selectionEnd = end;
   syncCommandClear();
@@ -1252,6 +1657,20 @@ function resultSelection() {
   return text;
 }
 
+function selectedText() {
+  const active = document.activeElement;
+  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+    const start = active.selectionStart ?? 0;
+    const end = active.selectionEnd ?? start;
+    const sub = active.value.slice(start, end);
+    if (sub.trim() !== '') return sub;
+  }
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return '';
+  const text = selection.toString();
+  return text.trim() === '' ? '' : text;
+}
+
 function closePick() {
   pick.hidden = true;
   pickText = '';
@@ -1269,9 +1688,45 @@ function placeFixed(node, x, y) {
   node.style.top = Math.min(Math.max(8, y), maxTop) + 'px';
 }
 
-function openPick(x, y) {
+function isObjectId(text) {
+  return /^\d+(\.\d+){3}$/.test(text.trim());
+}
+
+function formatSchemaName(name) {
+  const trimmed = name.trim();
+  if (!trimmed) return '';
+  if (/^['"].*['"]$/.test(trimmed)) return trimmed;
+  if (/[\s'"]/.test(trimmed)) return `'${trimmed.replace(/'/g, "\\'")}'`;
+  return `'${trimmed}'`;
+}
+
+function buildPrintSchemaCommand(kind, name) {
+  const quoted = formatSchemaName(name);
+  if (!quoted) return '';
+  if (kind === 'table') return `print table ${quoted} system;`;
+  return `print ${kind} ${quoted};`;
+}
+
+function openPick(x, y, inResult = true) {
   closeAssist();
   closeRowMenu();
+  closeComposerMenu();
+  const oid = inResult && isObjectId(pickText);
+  const pasteBtn = pick.querySelector('[data-act="paste"]');
+  const printBtn = pick.querySelector('[data-act="printBus"]');
+  const expandBtn = pick.querySelector('[data-act="expandBus"]');
+  if (pasteBtn) {
+    pasteBtn.hidden = !inResult;
+    pasteBtn.disabled = command.disabled;
+  }
+  if (printBtn) {
+    printBtn.hidden = !oid;
+    printBtn.disabled = command.disabled || sideBusy;
+  }
+  if (expandBtn) {
+    expandBtn.hidden = !oid;
+    expandBtn.disabled = command.disabled;
+  }
   placeFixed(pick, x, y);
 }
 
@@ -1283,11 +1738,14 @@ function closeRowMenu() {
 function openRowMenu(x, y) {
   closeAssist();
   closePick();
+  closeComposerMenu();
+  const printBtn = rowMenu.querySelector('[data-act="print"]');
+  if (printBtn) printBtn.disabled = command.disabled || sideBusy;
   placeFixed(rowMenu, x, y);
 }
 
 function isPromptLine(line) {
-  return /^MQL<\d+>$/.test(line.trim());
+  return /^MQL<\d*>$/.test(line.trim());
 }
 
 function isPromptTail(line) {
@@ -1296,9 +1754,11 @@ function isPromptTail(line) {
 }
 
 function syncDrawerControls() {
-  const locked = command.disabled || sideBusy;
-  drawerRefresh.disabled = locked;
-  listKind.disabled = locked;
+  document.body.classList.toggle('side-busy', sideBusy);
+  drawerRefresh.disabled = command.disabled || sideBusy;
+  const pickLocked = command.disabled && !sideHold;
+  helpTopic.disabled = pickLocked;
+  listKind.disabled = pickLocked;
   syncStatus();
 }
 
@@ -1365,6 +1825,7 @@ function appendList(flush) {
   const parts = slice.split(/\r\n|\n|\r/);
   if (slice.endsWith('\n') || slice.endsWith('\r')) parts.pop();
   const query = listFilter.value.trim().toLowerCase();
+  const frag = document.createDocumentFragment();
   for (const part of parts) {
     const line = part.trim();
     if (!line || isPromptLine(line)) continue;
@@ -1375,8 +1836,9 @@ function appendList(flush) {
     row.textContent = line;
     row.title = line;
     row.hidden = query !== '' && !line.toLowerCase().includes(query);
-    listView.append(row);
+    frag.append(row);
   }
+  listView.append(frag);
 }
 
 function applyListFilter() {
@@ -1388,25 +1850,35 @@ function applyListFilter() {
 }
 
 function requestSide(lane, text) {
-  if (sideBusy || command.disabled) return false;
+  if (sideBusy || sideHold) {
+    queuedSide = { lane, text };
+    return true;
+  }
+  if (command.disabled) return false;
   sideToken += 1;
   activeToken = sideToken;
   pendingLane = lane;
   sideBusy = true;
+  sideHold = true;
   sideStarted = false;
+  queuedSide = null;
+  if (lane === 'help') sentHelpTopic = helpTopic.value;
   if (lane === 'list') sentKind = listKind.value;
   syncDrawerControls();
+  setDrawerNote('조회 중');
   vscode.postMessage({ type: 'side', lane, text, token: activeToken });
   return true;
 }
 
-function fetchDrawerIfEmpty() {
-  if (!document.body.classList.contains('drawer-open') || sideBusy || command.disabled) return;
-  if (drawerLane === 'help') {
-    if (!helpFetched) requestSide('help', 'help');
+function flushQueuedSide() {
+  const next = queuedSide;
+  if (!next || sideBusy || sideHold || command.disabled) return;
+  if (!document.body.classList.contains('drawer-open') || next.lane !== drawerLane) {
+    queuedSide = null;
     return;
   }
-  if (listFetchedKind !== listKind.value) requestSide('list', `list ${listKind.value}`);
+  queuedSide = null;
+  requestSide(next.lane, next.text);
 }
 
 function setDrawerWidth(width) {
@@ -1428,7 +1900,12 @@ function setDrawerOpen(open) {
   if (!open) closeRowMenu();
   syncRail();
   syncHistory();
-  if (open) fetchDrawerIfEmpty();
+  if (open && !sideBusy) {
+    const fetched = drawerLane === 'help'
+      ? helpFetchedTopic === helpTopic.value
+      : listFetchedKind === listKind.value;
+    if (!fetched) setDrawerNote('조회를 누르세요.');
+  }
   savePrefs();
 }
 
@@ -1444,47 +1921,102 @@ function toggleDrawer(lane) {
 
 function refreshDrawer() {
   if (drawerRefresh.disabled) return;
-  if (drawerLane === 'help') requestSide('help', 'help');
+  if (drawerLane === 'help') requestSide('help', helpText());
   else requestSide('list', `list ${listKind.value}`);
 }
 
+const HELP_ADMIN = [
+  'application', 'association', 'attribute', 'bus', 'businessobject', 'channel', 'command', 'connection', 'context', 'dataobject',
+  'dimension', 'expression', 'filter', 'form', 'format', 'group', 'index', 'inheritancerule', 'inquiry', 'interface',
+  'location', 'menu', 'package', 'page', 'path', 'pathtype', 'person', 'policy', 'portal', 'product',
+  'program', 'property', 'relationship', 'resource', 'role', 'rule', 'searchindex', 'site', 'store', 'system',
+  'table', 'transaction', 'type', 'uniquekey', 'user', 'vault', 'webreport',
+];
+
+const HELP_COMMANDS = [
+  'abort', 'add', 'approve', 'checkin', 'checkout', 'checkshowaccess', 'clear', 'commit', 'compare', 'compile',
+  'config', 'connect', 'copy', 'del', 'delete', 'demote', 'disable', 'disconnect', 'enable', 'env',
+  'escape', 'eval', 'evaluate', 'eventmonitor', 'exec', 'execute', 'expand', 'export', 'extract', 'history',
+  'ignore', 'import', 'insert', 'list', 'lock', 'mail', 'mod', 'modify', 'monitor', 'move',
+  'mql', 'override', 'password', 'pop', 'print', 'promote', 'push', 'query', 'reject', 'run',
+  'server', 'sessions', 'set', 'start', 'temp', 'thread', 'toolset', 'trace', 'transfer', 'transition',
+  'trigger', 'unlock', 'validate', 'verb', 'verbose', 'version',
+];
+
+function helpOption(name) {
+  const option = document.createElement('option');
+  option.value = name;
+  option.textContent = name;
+  return option;
+}
+
+function fillHelpTopics() {
+  const admin = document.createElement('optgroup');
+  admin.label = '대상';
+  for (const name of HELP_ADMIN) admin.append(helpOption(name));
+  const commands = document.createElement('optgroup');
+  commands.label = '명령';
+  for (const name of HELP_COMMANDS) commands.append(helpOption(name));
+  helpTopic.append(admin, commands);
+}
+
+function helpText() {
+  const topic = helpTopic.value;
+  if (!topic) return 'help';
+  return `help ${topic}`;
+}
+
+function setDrawerNote(text) {
+  drawerNote.hidden = text === '';
+  drawerNote.textContent = text;
+  drawerNote.classList.toggle('loading', text === '조회 중');
+}
+
+fillHelpTopics();
+
 function onSideStart(message) {
   if (message.token !== activeToken || message.lane !== pendingLane) return;
+  sideBusy = true;
   sideStarted = true;
+  syncDrawerControls();
   if (message.lane === 'help') {
     helpRaw = '';
-    paintHelp(false, false);
-    return;
-  }
-  resetList();
+    helpView.textContent = '';
+    helpView.scrollTop = 0;
+  } else resetList();
+  setDrawerNote('조회 중');
 }
 
 function onSideChunk(message) {
   if (message.token !== activeToken || message.lane !== pendingLane) return;
-  if (message.lane === 'help') {
-    helpRaw += message.text;
-    paintHelp(false, false);
-    return;
-  }
-  listRaw += message.text;
-  appendList(false);
+  if (message.lane === 'help') helpRaw += message.text;
+  else listRaw += message.text;
 }
 
 function onSideEnd(message) {
   if (message.token !== activeToken) return;
   const started = sideStarted;
   const lane = pendingLane;
+  const superseded = queuedSide !== null;
   sideBusy = false;
   sideStarted = false;
-  if (started && lane === 'help') {
+  if (!command.disabled) sideHold = false;
+  if (!superseded && started && lane === 'help') {
     paintHelp(true, false);
-    helpFetched = true;
-  }
-  if (started && lane === 'list') {
+    helpFetchedTopic = sentHelpTopic;
+    setDrawerNote(helpRaw.trim() ? '' : '결과가 없습니다.');
+  } else if (!superseded && started && lane === 'list') {
     appendList(true);
     listFetchedKind = sentKind;
-  }
+    const names = [];
+    for (const row of listView.children) {
+      if (row.dataset.name) names.push(row.dataset.name);
+    }
+    schemaCache.set(sentKind, names);
+    setDrawerNote(listView.children.length === 0 ? '결과가 없습니다.' : '');
+  } else if (!superseded) setDrawerNote('조회하지 못했습니다.');
   syncDrawerControls();
+  flushQueuedSide();
 }
 
 let stageGrow = '';
@@ -1502,8 +2034,10 @@ function setComposerHidden(hidden) {
   composerToggle.title = label;
   composerToggle.setAttribute('aria-label', label);
   composerToggle.setAttribute('aria-pressed', hidden ? 'true' : 'false');
-  if (hidden) closeAssist();
-  else if (!command.disabled) command.focus();
+  if (hidden) {
+    closeAssist();
+    closeComposerMenu();
+  } else if (!command.disabled) command.focus();
   savePrefs();
 }
 
@@ -1523,29 +2057,38 @@ window.addEventListener('message', (event) => {
   const message = event.data;
   if (!message || typeof message.type !== 'string') return;
   if (message.type === 'state') {
+    cancelPaint();
     render(message);
     return;
   }
   if (message.type === 'block') {
+    runningId = message.id;
     history.append(blockNode(message));
     addRecall(message.id, message.command);
+    updateTxFromCommand(message.command, false);
     syncStatus();
     if (findQuery) syncFind(false);
     follow();
     return;
   }
   if (message.type === 'chunk') {
-    const id = String(message.id);
-    const stored = blockText.get(id);
-    const result = findResult(message.id);
-    if (!result || !stored) return;
+    const stored = blockText.get(String(message.id));
+    if (!stored) return;
+    // 텍스트만 누적하고 그리기는 프레임 단위로 모아서 한다(조각마다 전체를 다시 그리면 대용량 결과에서 프리징).
     stored.result += message.text;
-    paintResult(result, stored.result);
-    if (findQuery) syncFind(false);
-    follow();
+    queuePaint(message.id);
+    return;
+  }
+  if (message.type === 'blockDone') {
+    flushPaint();
+    settleBlock(message.id);
+    const stored = blockText.get(String(message.id));
+    if (stored && hasErrorLine(cleanResult(stored.result))) recomputeAllTx();
     return;
   }
   if (message.type === 'cleared') {
+    cancelPaint();
+    runningId = null;
     for (const item of history.querySelectorAll('.block')) item.remove();
     pruneBlockState();
     markRecall();
@@ -1558,22 +2101,39 @@ window.addEventListener('message', (event) => {
     return;
   }
   if (message.type === 'clearEnabled') setClearEnabled(message.enabled);
-  if (message.type === 'suggest') openAssist();
+  if (message.type === 'suggest') openAssist(true);
   if (message.type === 'format') formatCommand();
+  if (message.type === 'joinLines') joinLines();
   if (message.type === 'sideStart') onSideStart(message);
   if (message.type === 'sideChunk') onSideChunk(message);
   if (message.type === 'sideEnd') onSideEnd(message);
+  if (message.type === 'jpoPicked' && typeof message.path === 'string') {
+    jpoPath.value = message.path;
+    syncJpoPath();
+    syncFieldClears();
+    if (!jpoPath.disabled) jpoPath.focus();
+    savePrefs();
+  }
 });
 
-history.addEventListener('mouseup', (event) => {
-  if (event.button !== 0) return;
-  const text = resultSelection();
-  if (!text) {
-    closePick();
+document.addEventListener('contextmenu', (event) => {
+  if (event.defaultPrevented) return;
+  event.preventDefault();
+  const resText = resultSelection();
+  if (resText) {
+    pickText = resText;
+    openPick(event.clientX, event.clientY, true);
     return;
   }
-  pickText = text;
-  openPick(event.clientX, event.clientY);
+  const anyText = selectedText();
+  if (anyText) {
+    pickText = anyText;
+    openPick(event.clientX, event.clientY, false);
+    return;
+  }
+  closePick();
+  closeRowMenu();
+  closeComposerMenu();
 });
 
 history.addEventListener('wheel', () => {
@@ -1653,7 +2213,7 @@ findInput.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     event.preventDefault();
     findInput.value = '';
-    setFindQuery('');
+    findInput.dispatchEvent(new Event('input', { bubbles: true }));
   }
 });
 
@@ -1677,11 +2237,56 @@ findNext.addEventListener('click', () => {
   moveFind(1);
 });
 
+function isCtrlSpace(event) {
+  if (!event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return false;
+  return event.code === 'Space' || event.key === ' ' || event.key === 'Spacebar' || event.keyCode === 32;
+}
+
+function isTextField(node) {
+  if (node instanceof HTMLTextAreaElement) return !node.disabled && !node.readOnly;
+  if (!(node instanceof HTMLInputElement) || node.disabled || node.readOnly) return false;
+  return node.type === 'text' || node.type === 'search' || node.type === '';
+}
+
+function editHistoryCommand(event) {
+  if (event.isComposing || event.altKey) return '';
+  if (!event.ctrlKey && !event.metaKey) return '';
+  if (event.code === 'KeyY' && !event.shiftKey) return 'redo';
+  if (event.code !== 'KeyZ') return '';
+  return event.shiftKey ? 'redo' : 'undo';
+}
+
+function applyEditHistory(event) {
+  const commandName = editHistoryCommand(event);
+  const field = document.activeElement;
+  if (!commandName || !isTextField(field)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  setTimeout(() => {
+    if (document.activeElement !== field) return;
+    document.execCommand(commandName);
+  }, 0);
+  return true;
+}
+
+function isOtherInput(node) {
+  return node === findInput || node === jpoPath || node === recallFilter || node === helpTopic || node === helpFind || node === listFilter || node === listKind;
+}
+
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && (!pick.hidden || !rowMenu.hidden)) {
+  if (applyEditHistory(event)) return;
+  if (isCtrlSpace(event)) {
+    if (isOtherInput(document.activeElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openAssist(true);
+    return;
+  }
+  if (event.key === 'Escape' && (!pick.hidden || !rowMenu.hidden || !composerMenu.hidden)) {
     event.preventDefault();
     closePick();
     closeRowMenu();
+    closeComposerMenu();
     return;
   }
   if (event.key !== 'f' && event.key !== 'F') return;
@@ -1696,7 +2301,7 @@ window.addEventListener('keydown', (event) => {
   closeAssist();
   findInput.focus();
   findInput.select();
-});
+}, true);
 
 recallList.addEventListener('click', (event) => {
   const target = event.target;
@@ -1727,6 +2332,38 @@ recallFilter.addEventListener('input', () => {
   applyRecallFilter();
 });
 
+const fieldClears = [];
+
+function watchFieldClear(input) {
+  const button = input.parentElement ? input.parentElement.querySelector('.field-x') : null;
+  if (!button) return;
+  const sync = () => {
+    button.hidden = input.value === '';
+  };
+  input.addEventListener('input', sync);
+  button.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+  });
+  button.addEventListener('click', () => {
+    if (input.value === '') return;
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    if (!input.disabled) input.focus();
+  });
+  fieldClears.push(sync);
+  sync();
+}
+
+function syncFieldClears() {
+  for (const sync of fieldClears) sync();
+}
+
+watchFieldClear(findInput);
+watchFieldClear(helpFind);
+watchFieldClear(listFilter);
+watchFieldClear(jpoPath);
+watchFieldClear(recallFilter);
+
 recallClear.addEventListener('click', () => {
   if (recallClear.disabled) return;
   clearRecall();
@@ -1752,26 +2389,142 @@ recallSplit.addEventListener('mousedown', (event) => {
   window.addEventListener('mouseup', up);
 });
 
+const CLAUSE_HEADS = new Set([
+  'where',
+  'select',
+  'orderby',
+  'limit',
+  'dump',
+  'recordsep',
+  'tcl',
+  'output',
+  'from',
+  'to',
+  'relationship',
+  'rel',
+  'recurse',
+  'terse',
+  'vault',
+  'owner',
+  'policy',
+  'description',
+  'state',
+  'current',
+]);
+
+function isLineStarter(lineText) {
+  const parts = lineText.trim().toLowerCase().split(/\s+/);
+  const w0 = parts[0];
+  if (!w0 || CLAUSE_HEADS.has(w0)) return false;
+  for (const starter of MQL_STARTERS) {
+    if (starter.startsWith(w0)) {
+      if (w0 === 'temp' && parts[1] && !'query'.startsWith(parts[1])) return false;
+      return true;
+    }
+  }
+  return false;
+}
+
 function statementPrefix() {
   const cursor = caretOffset();
   const text = command.value;
   let from = text.slice(0, cursor).lastIndexOf(';');
   from = from === -1 ? 0 : from + 1;
+  const lineBreak = Math.max(text.lastIndexOf('\n', cursor - 1), text.lastIndexOf('\r', cursor - 1));
+  if (lineBreak >= from) {
+    const beforeLine = text.slice(from, lineBreak).trim();
+    const currentLine = text.slice(lineBreak + 1, cursor);
+    const trimmedLine = currentLine.trim();
+    if (beforeLine && (!trimmedLine || isLineStarter(trimmedLine))) {
+      from = lineBreak + 1;
+    }
+  }
   while (from < cursor && /\s/.test(text[from])) from += 1;
   return { from, to: cursor, raw: text.slice(from, cursor) };
 }
 
 function phraseKey(raw) {
-  return raw.replace(/\s+/g, ' ').replace(/^\s+/, '').toLowerCase();
+  return raw.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function matchPhrases(raw) {
+function matchPhrases(raw, force = false) {
   const key = phraseKey(raw);
-  if (!key.trim()) return phrases.slice();
-  return phrases.filter((phrase) => {
+  if (!key) return phrases.slice();
+  const staticMatches = phrases.filter((phrase) => {
     const text = phrase.toLowerCase();
-    return text.startsWith(key) && text !== key.trim();
+    return text.startsWith(key) && text !== key;
   });
+  const dynamicMatches = [];
+  const attrBracket = raw.match(/^(.*?\battribute\[)([^\]]*)$/i);
+  if (attrBracket && schemaCache.has('attribute')) {
+    const head = attrBracket[1];
+    const partial = attrBracket[2].toLowerCase();
+    for (const name of schemaCache.get('attribute')) {
+      if (!partial || name.toLowerCase().startsWith(partial)) {
+        dynamicMatches.push(`${head}${name}].value`);
+        if (dynamicMatches.length >= 40) break;
+      }
+    }
+  } else {
+    const cmdMatch = raw.match(/^\s*(print|mod|modify|del|delete|help|list)\s+(type|policy|attribute|relationship|person|program|vault|role|group|association|command|menu|form|table|channel|portal|page)(?:\s+([^\s;]*))?$/i);
+    if (cmdMatch) {
+      const verb = cmdMatch[1];
+      const kind = cmdMatch[2].toLowerCase();
+      const partial = (cmdMatch[3] || '').replace(/^['"]|['"]$/g, '').toLowerCase();
+      const cached = schemaCache.get(kind);
+      if (cached) {
+        for (const name of cached) {
+          if (!partial || name.toLowerCase().includes(partial)) {
+            const quoted = formatSchemaName(name);
+            const suffix = kind === 'table' && verb.toLowerCase() === 'print' ? ' system' : '';
+            const candidate = `${verb} ${kind} ${quoted}${suffix}`;
+            if (candidate.toLowerCase() !== key) {
+              dynamicMatches.push(candidate);
+              if (dynamicMatches.length >= 40) break;
+            }
+          }
+        }
+      }
+    }
+  }
+  const combined = [...staticMatches, ...dynamicMatches];
+  if (combined.length > 0) return combined;
+  const clauseMatches = [];
+  const busQueryMatch = raw.match(/^(\s*(?:temp\s+)?query\s+bus\s+\S+\s+\S+\s+\S+)(?:\s+(.*))?$/i);
+  if (busQueryMatch) {
+    const head = busQueryMatch[1].replace(/\s+/g, ' ').trim();
+    const tail = (busQueryMatch[2] || '').trim().toLowerCase();
+    for (const suffix of [
+      'select name id description',
+      'where "attribute[???] == \'???\'"',
+      'limit 0 orderby id select name id description',
+    ]) {
+      if (!tail || suffix.startsWith(tail)) {
+        const candidate = `${head} ${suffix}`;
+        if (candidate.toLowerCase() !== key) clauseMatches.push(candidate);
+      }
+    }
+  }
+  const busTargetMatch = raw.match(/^(\s*(?:print|expand)\s+bus\s+(?:\d+(?:\.\d+){3}|\S+\s+\S+\s+\S+))(?:\s+(.*))?$/i);
+  if (busTargetMatch) {
+    const head = busTargetMatch[1].replace(/\s+/g, ' ').trim();
+    const tail = (busTargetMatch[2] || '').trim().toLowerCase();
+    const isExpand = /^\s*expand\b/i.test(head);
+    const suffixes = isExpand
+      ? ['recurse to all select bus id current']
+      : ['select name id description', 'select id current attribute[???].value'];
+    for (const suffix of suffixes) {
+      if (!tail || suffix.startsWith(tail)) {
+        const candidate = `${head} ${suffix}`;
+        if (candidate.toLowerCase() !== key) clauseMatches.push(candidate);
+      }
+    }
+  }
+  if (clauseMatches.length > 0) return clauseMatches;
+  if (!force) return [];
+  const firstWord = key.split(' ')[0];
+  const verbMatches = phrases.filter((phrase) => phrase.toLowerCase().startsWith(firstWord));
+  return verbMatches.length > 0 ? verbMatches : phrases.slice();
 }
 
 function closeAssist() {
@@ -1854,12 +2607,153 @@ function placeAssist() {
   assist.style.top = top + 'px';
 }
 
-function openAssist() {
+function closeComposerMenu() {
+  composerMenu.hidden = true;
+  composerGear.setAttribute('aria-expanded', 'false');
+}
+
+function openComposerMenu() {
+  closeAssist();
+  closePick();
+  closeRowMenu();
+  const rect = composerGear.getBoundingClientRect();
+  composerMenu.style.left = Math.max(8, rect.left) + 'px';
+  composerMenu.style.top = rect.bottom + 4 + 'px';
+  composerMenu.hidden = false;
+  composerGear.setAttribute('aria-expanded', 'true');
+  const width = composerMenu.offsetWidth;
+  const height = composerMenu.offsetHeight;
+  const maxLeft = Math.max(8, window.innerWidth - width - 8);
+  const left = Math.min(Math.max(8, rect.right - width), maxLeft);
+  let top = rect.bottom + 4;
+  if (top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - 4);
+  composerMenu.style.left = left + 'px';
+  composerMenu.style.top = top + 'px';
+}
+
+function setLineNumbers(on) {
+  document.body.classList.toggle('line-numbers', on);
+  lineNumbersItem.setAttribute('aria-checked', on ? 'true' : 'false');
+  syncGutter();
+}
+
+let gutterLayout = false;
+
+function measureLineHeights(lines, width) {
+  const style = getComputedStyle(command);
+  const mirror = document.createElement('div');
+  mirror.style.position = 'fixed';
+  mirror.style.left = '0';
+  mirror.style.top = '0';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.boxSizing = 'border-box';
+  mirror.style.width = width + 'px';
+  mirror.style.whiteSpace = style.whiteSpace;
+  mirror.style.overflowWrap = style.overflowWrap;
+  mirror.style.wordWrap = style.wordWrap;
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.style.paddingTop = style.paddingTop;
+  mirror.style.paddingRight = style.paddingRight;
+  mirror.style.paddingBottom = '0';
+  mirror.style.paddingLeft = style.paddingLeft;
+  mirror.style.border = '0';
+  for (const prop of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'lineHeight', 'tabSize', 'wordSpacing']) {
+    mirror.style[prop] = style[prop];
+  }
+  const rows = [];
+  for (const line of lines) {
+    const row = document.createElement('div');
+    row.style.whiteSpace = style.whiteSpace;
+    row.style.overflowWrap = style.overflowWrap;
+    row.style.wordWrap = style.wordWrap;
+    row.style.wordBreak = style.wordBreak;
+    row.textContent = line.length > 0 ? line : '\u200b';
+    mirror.append(row);
+    rows.push(row);
+  }
+  document.body.append(mirror);
+  const heights = rows.map((row) => row.getBoundingClientRect().height);
+  mirror.remove();
+  return heights;
+}
+
+function paintGutter(heights, lineHeight) {
+  while (gutter.childElementCount > heights.length) gutter.lastElementChild.remove();
+  while (gutter.childElementCount < heights.length) {
+    const row = document.createElement('div');
+    row.className = 'gutter-line';
+    gutter.append(row);
+  }
+  for (let i = 0; i < heights.length; i += 1) {
+    const row = gutter.children[i];
+    const label = String(i + 1);
+    if (row.textContent !== label) row.textContent = label;
+    const height = heights[i] > 0 ? heights[i] : lineHeight;
+    row.style.height = height + 'px';
+  }
+}
+
+function absorbGutterGap(lineHeight) {
+  const last = gutter.lastElementChild;
+  if (!last || lineHeight <= 0) return;
+  const gap = command.scrollHeight - gutter.scrollHeight;
+  if (gap === 0 || Math.abs(gap) > lineHeight) return;
+  const next = (parseFloat(last.style.height) || 0) + gap;
+  if (next < lineHeight) return;
+  last.style.height = next + 'px';
+}
+
+function layoutGutter() {
+  if (gutterLayout) return;
+  gutterLayout = true;
+  try {
+    const style = getComputedStyle(command);
+    gutter.style.paddingTop = style.paddingTop;
+    gutter.style.paddingBottom = style.paddingBottom;
+    gutter.style.fontFamily = style.fontFamily;
+    gutter.style.fontSize = style.fontSize;
+    gutter.style.lineHeight = style.lineHeight;
+    gutter.style.letterSpacing = style.letterSpacing;
+    const lineHeight = parseFloat(style.lineHeight) || 0;
+    const lines = command.value.split('\n');
+    gutter.style.setProperty('--gutter-digits', String(String(Math.max(lines.length, 1)).length));
+    let previous = -1;
+    for (let pass = 0; pass < 4; pass += 1) {
+      const width = command.clientWidth;
+      if (pass > 0 && width === previous) break;
+      previous = width;
+      paintGutter(measureLineHeights(lines, width), lineHeight);
+    }
+    absorbGutterGap(lineHeight);
+  } finally {
+    gutterLayout = false;
+  }
+}
+
+function syncGutter() {
+  if (!document.body.classList.contains('line-numbers')) {
+    if (gutter.childElementCount > 0) gutter.replaceChildren();
+    gutter.scrollTop = 0;
+    return;
+  }
+  if (command.clientWidth <= 0) return;
+  layoutGutter();
+  gutter.scrollTop = command.scrollTop;
+}
+
+function openAssist(force = false) {
   if (command.disabled) return;
+  closeComposerMenu();
   const active = document.activeElement;
-  if (active !== command && active !== document.body && active !== document.documentElement) return;
-  if (active !== command) command.focus();
-  assistMatches = matchPhrases(statementPrefix().raw);
+  if (isOtherInput(active)) return;
+  if (!force && active !== command && active !== document.body && active !== document.documentElement) return;
+  if (document.body.classList.contains('composer-hidden')) {
+    if (!force) return;
+    setComposerHidden(false);
+  }
+  if (document.activeElement !== command) command.focus();
+  assistMatches = matchPhrases(statementPrefix().raw, force);
   assistIndex = 0;
   if (assistMatches.length === 0) {
     closeAssist();
@@ -1891,9 +2785,9 @@ function acceptAssist() {
 }
 
 command.addEventListener('keydown', (event) => {
-  if (event.key === ' ' && event.ctrlKey && !event.altKey && !event.shiftKey) {
+  if (isCtrlSpace(event)) {
     event.preventDefault();
-    openAssist();
+    openAssist(true);
     return;
   }
   if (!assist.hidden) {
@@ -1932,22 +2826,52 @@ command.addEventListener('input', () => {
 
 command.addEventListener('scroll', () => {
   if (!assist.hidden) placeAssist();
+  if (document.body.classList.contains('line-numbers')) gutter.scrollTop = command.scrollTop;
 });
+
+gutter.addEventListener('wheel', (event) => {
+  if (!document.body.classList.contains('line-numbers')) return;
+  command.scrollTop += event.deltaY;
+  command.scrollLeft += event.deltaX;
+}, { passive: true });
 
 window.addEventListener('resize', () => {
   if (!assist.hidden) placeAssist();
   closePick();
   closeRowMenu();
+  closeComposerMenu();
 });
+
+new ResizeObserver(() => {
+  placeCommandClear();
+}).observe(command, { box: 'content-box' });
 
 pick.addEventListener('mousedown', (event) => {
   event.preventDefault();
   event.stopPropagation();
-  const text = pickText;
+  if (event.button !== 0) return;
+  const target = event.target;
+  const button = target instanceof Element ? target.closest('button') : null;
+  if (!button || button.disabled) return;
+  const act = button.dataset.act || 'paste';
+  const text = pickText.trim();
+  const raw = pickText;
   closePick();
-  if (!text) return;
-  insertAtCaret(text);
   window.getSelection()?.removeAllRanges();
+  if (!raw) return;
+  if (act === 'copy') {
+    vscode.postMessage({ type: 'copy', text: raw });
+    return;
+  }
+  if (act === 'printBus' && isObjectId(text)) {
+    if (!command.disabled && !sideBusy) vscode.postMessage({ type: 'send', text: `print bus ${text};` });
+    return;
+  }
+  if (act === 'expandBus' && isObjectId(text)) {
+    if (!command.disabled) insertStatement(`expand bus ${text} recurse to all select bus id current;`);
+    return;
+  }
+  insertAtCaret(raw);
 });
 
 document.addEventListener('mousedown', (event) => {
@@ -1970,10 +2894,16 @@ rowMenu.addEventListener('mousedown', (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
   const button = target.closest('button');
+  if (!button || button.disabled) return;
   const text = rowMenuText;
-  const act = button ? button.dataset.act : '';
+  const act = button.dataset.act || '';
   closeRowMenu();
   if (!text || !act) return;
+  if (act === 'print') {
+    const cmd = buildPrintSchemaCommand(listFetchedKind || listKind.value, text);
+    if (cmd && !command.disabled && !sideBusy) vscode.postMessage({ type: 'send', text: cmd });
+    return;
+  }
   if (act === 'insert') {
     if (!command.disabled) insertAtCaret(text);
     return;
@@ -2013,6 +2943,28 @@ composerToggle.addEventListener('click', () => {
   setComposerHidden(!document.body.classList.contains('composer-hidden'));
 });
 
+composerGear.addEventListener('click', () => {
+  if (composerMenu.hidden) openComposerMenu();
+  else closeComposerMenu();
+});
+
+composerMenu.addEventListener('mousedown', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest('#line-numbers')) return;
+  setLineNumbers(!document.body.classList.contains('line-numbers'));
+  closeComposerMenu();
+  if (!command.disabled && !document.body.classList.contains('composer-hidden')) command.focus();
+});
+
+document.addEventListener('mousedown', (event) => {
+  if (composerMenu.hidden) return;
+  const target = event.target;
+  if (!(target instanceof Node) || composerMenu.contains(target) || composerGear.contains(target)) return;
+  closeComposerMenu();
+});
+
 jpoToggle.addEventListener('click', () => {
   if (jpoToggle.disabled) return;
   setJpoOpen(!jpo.classList.contains('on'));
@@ -2023,14 +2975,34 @@ jpoPath.addEventListener('input', () => {
   savePrefs();
 });
 
+jpoBrowse.addEventListener('click', () => {
+  if (jpoBrowse.disabled) return;
+  vscode.postMessage({ type: 'pickJpo' });
+});
+
 jpoRun.addEventListener('click', () => {
   runJpo();
+});
+
+txCommit.addEventListener('click', () => {
+  if (txCommit.disabled || command.disabled) return;
+  vscode.postMessage({ type: 'send', text: 'commit transaction;' });
+});
+
+txAbort.addEventListener('click', () => {
+  if (txAbort.disabled || command.disabled) return;
+  vscode.postMessage({ type: 'send', text: 'abort transaction;' });
 });
 
 jpoPath.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') return;
   event.preventDefault();
   runJpo();
+});
+
+document.getElementById('snippets').addEventListener('mousedown', (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest('button')) return;
+  event.preventDefault();
 });
 
 document.getElementById('snippets').addEventListener('click', (event) => {
@@ -2040,15 +3012,18 @@ document.getElementById('snippets').addEventListener('click', (event) => {
   if (!button || button.disabled) return;
   const kind = button.dataset.insert;
   if (kind === 'context') insertStatement('set context user creator;');
+  else if (kind === 'verb') insertStatement('verb on;');
   else if (kind === 'temp') insertStatement('temp query bus * * *');
   else if (kind === 'print') insertStatement('print bus * * *');
+  else if (kind === 'expand') insertStatement('expand bus * * * recurse to all select bus id current');
   else if (kind === 'limit') appendClause('limit 0 orderby id select name id description');
   else if (kind === 'where') appendClause('where "attribute[???] == \'???\'"', '???');
 });
 
 split.addEventListener('mousedown', (event) => {
   if (document.body.classList.contains('composer-hidden')) return;
-  if (!(event.target instanceof Element) || event.target.closest('#run') || event.target.closest('#commandClear') || event.target.closest('#composerToggle') || event.target.closest('#snippets') || event.target.closest('#jpo')) return;
+  if (!(event.target instanceof Element) || event.target.closest('#run') || event.target.closest('#composerToggle') || event.target.closest('#composerGear') || event.target.closest('#snippets') || event.target.closest('#jpo')) return;
+  closeComposerMenu();
   event.preventDefault();
   const previous = document.body.style.userSelect;
   document.body.style.userSelect = 'none';
@@ -2121,6 +3096,13 @@ listFilter.addEventListener('input', () => {
   applyListFilter();
 });
 
+helpTopic.addEventListener('change', () => {
+  if (helpTopic.value !== helpFetchedTopic && !requestSide('help', helpText())) {
+    helpTopic.value = helpFetchedTopic || '';
+  }
+  savePrefs();
+});
+
 listKind.addEventListener('change', () => {
   savePrefs();
   if (listKind.value === listFetchedKind) return;
@@ -2147,10 +3129,48 @@ clearButton.addEventListener('click', () => {
   vscode.postMessage({ type: 'clear' });
 });
 
-restartButton.addEventListener('click', () => {
+function resetView() {
+  closeAssist();
+  closePick();
+  closeRowMenu();
+  closeComposerMenu();
+  command.value = '';
+  syncCommandClear();
+  findInput.value = '';
+  setFindQuery('');
+  jpoPath.value = '';
+  syncJpoPath();
+  recallFilter.value = '';
+  dismissedRecall.clear();
+  recallList.replaceChildren();
+  syncRecallClear();
+  helpFind.value = '';
+  helpQuery = '';
+  paintHelp(true, false);
+  listFilter.value = '';
+  applyListFilter();
+  syncFieldClears();
+  history.replaceChildren();
+  blockText.clear();
+  collapsed.clear();
+  txActive = false;
+  sideBusy = false;
+  sideHold = false;
+  sideStarted = false;
+  queuedSide = null;
+  syncTx();
+  syncFind(false);
+  savePrefs();
   vscode.postMessage({ type: 'restart' });
+}
+
+restartButton.addEventListener('click', () => {
+  resetView();
 });
 
 syncHistory();
 syncRail();
+new ResizeObserver(() => {
+  syncGutter();
+}).observe(command);
 vscode.postMessage({ type: 'ready' });

@@ -11,8 +11,16 @@
       <span class="status-dot"></span>
       <span id="status-text">연결 중</span>
     </div>
+    <div id="tx" class="tx" hidden>
+      <span class="tx-badge">TX</span>
+      <button id="tx-commit" type="button" title="commit transaction;">commit</button>
+      <button id="tx-abort" type="button" title="abort transaction;">abort</button>
+    </div>
     <div id="find">
-      <input id="find-input" type="text" spellcheck="false" autocomplete="off" placeholder="결과 검색 (Ctrl+F)" aria-label="결과 검색" />
+      <div id="find-field" class="clear-field">
+        <input id="find-input" type="text" spellcheck="false" autocomplete="off" placeholder="결과 검색 (Ctrl+F)" aria-label="결과 검색" />
+        <button type="button" class="field-x" title="지우기" aria-label="지우기" hidden>×</button>
+      </div>
       <button id="find-case" type="button" class="find-opt" title="대/소문자 구분 (Alt+C)" aria-label="대/소문자 구분" aria-pressed="false">Aa</button>
       <button id="find-word" type="button" class="find-opt" title="단어 단위로 (Alt+W)" aria-label="단어 단위로" aria-pressed="false">ab</button>
       <button id="find-regex" type="button" class="find-opt" title="정규식 사용 (Alt+R)" aria-label="정규식 사용" aria-pressed="false">.*</button>
@@ -43,6 +51,7 @@
           <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 실행</span>
           <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 명령 제안</span>
           <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 포매팅</span>
+          <span><kbd>Ctrl</kbd>+<kbd>J</kbd> 줄 합치기</span>
           <span><kbd>Ctrl</kbd>+<kbd>F</kbd> 결과 검색</span>
         </div>
       </div>
@@ -65,7 +74,13 @@
     <aside id="drawer" aria-hidden="true">
       <div id="drawer-pane">
         <div id="drawer-head">
-          <input id="help-find" type="text" spellcheck="false" autocomplete="off" placeholder="검색" aria-label="help 검색" />
+          <select id="help-topic" aria-label="help 대상" disabled>
+            <option value="">전체</option>
+          </select>
+          <div id="help-find-field" class="clear-field">
+            <input id="help-find" type="text" spellcheck="false" autocomplete="off" placeholder="검색" aria-label="help 검색" />
+            <button type="button" class="field-x" title="지우기" aria-label="지우기" hidden>×</button>
+          </div>
           <select id="list-kind" aria-label="list 대상" disabled>
             <option value="type">type</option>
             <option value="person">person</option>
@@ -80,8 +95,15 @@
             <option value="command">command</option>
             <option value="menu">menu</option>
             <option value="form">form</option>
+            <option value="table">table</option>
+            <option value="channel">channel</option>
+            <option value="portal">portal</option>
+            <option value="page">page</option>
           </select>
-          <input id="list-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="list 필터" />
+          <div id="list-filter-field" class="clear-field">
+            <input id="list-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="list 필터" />
+            <button type="button" class="field-x" title="지우기" aria-label="지우기" hidden>×</button>
+          </div>
           <button id="drawer-refresh" type="button" title="조회" aria-label="조회" disabled>조회</button>
           <button id="drawer-close" type="button" title="접기" aria-label="접기">접기</button>
           <button id="drawer-wide" type="button" title="전체 너비" aria-label="전체 너비" aria-pressed="false">
@@ -93,6 +115,7 @@
             </svg>
           </button>
         </div>
+        <p id="drawer-note" hidden></p>
         <pre id="help-view"></pre>
         <div id="list-view"></div>
       </div>
@@ -106,7 +129,11 @@
     </button>
     <div id="jpo">
       <button id="jpoToggle" type="button" title="JPO 경로" aria-pressed="false" disabled>jpo</button>
-      <input id="jpoPath" type="text" spellcheck="false" autocomplete="off" placeholder="JPO 파일 경로" disabled />
+      <div id="jpo-path-field" class="clear-field">
+        <input id="jpoPath" type="text" spellcheck="false" autocomplete="off" placeholder="JPO 파일 경로" disabled />
+        <button type="button" class="field-x" title="지우기" aria-label="지우기" hidden>×</button>
+      </div>
+      <button id="jpoBrowse" type="button" title="파일 찾기" aria-label="파일 찾기" disabled>찾기</button>
       <button id="jpoRun" type="button" title="실행" aria-label="실행" disabled>
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
           <path fill="currentColor" d="M4.5 2.5v11l9-5.5z" />
@@ -115,12 +142,18 @@
     </div>
     <div id="snippets">
       <button type="button" data-insert="context" title="set context user creator;" disabled>context</button>
+      <button type="button" data-insert="verb" title="verb on;" disabled>verb</button>
       <button type="button" data-insert="temp" title="temp query bus * * *" disabled>temp</button>
       <button type="button" data-insert="print" title="print bus * * *" disabled>print</button>
+      <button type="button" data-insert="expand" title="expand bus * * * recurse to all select bus id current" disabled>expand</button>
       <button type="button" data-insert="limit" title="limit 0 orderby id select name id description" disabled>+limit</button>
       <button type="button" data-insert="where" title="where &quot;attribute[???] == '???'&quot;" disabled>+where</button>
     </div>
-    <button id="commandClear" type="button" title="입력 지우기" aria-label="입력 지우기" disabled>지우기</button>
+    <button id="composerGear" type="button" title="입력 설정" aria-label="입력 설정" aria-haspopup="menu" aria-expanded="false">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+        <path fill="currentColor" fill-rule="evenodd" d="M9.1 4.4 8.6 2.1h-1.2L6.9 4.4l-.7.3-1.8-1.1-1.1 1.1 1.1 1.8-.3.7-2.3.6v1.4l2.3.6.3.7-1.1 1.8 1.1 1.1 1.8-1.1.7.3.6 2.3h1.4l.6-2.3.7-.3 1.8 1.1 1.1-1.1-1.1-1.8.3-.7 2.3-.6V7.3l-2.3-.6-.3-.7 1.1-1.8-1.1-1.1-1.8 1.1-.7-.3zM8 9.5A1.5 1.5 0 1 1 8 6.5a1.5 1.5 0 0 1 0 3z" />
+      </svg>
+    </button>
     <button id="composerToggle" type="button" title="입력 숨기기" aria-label="입력 숨기기" aria-pressed="false">
       <svg class="icon-minimize" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
         <path fill="currentColor" d="M3 7.5C3 7.22386 3.22386 7 3.5 7H12.5C12.7761 7 13 7.22386 13 7.5C13 7.77614 12.7761 8 12.5 8H3.5C3.22386 8 3 7.77614 3 7.5Z" />
@@ -131,11 +164,18 @@
     </button>
   </div>
   <div id="composer">
-    <textarea id="command" disabled spellcheck="false" autocomplete="off"></textarea>
+    <div id="command-wrap">
+      <div id="gutter" aria-hidden="true"></div>
+      <textarea id="command" disabled spellcheck="false" autocomplete="off"></textarea>
+      <button id="commandClear" type="button" title="입력 지우기" aria-label="입력 지우기" disabled>지우기</button>
+    </div>
     <div id="recall-split" title="너비 조절"></div>
     <div id="recall">
       <div id="recall-head">
-        <input id="recall-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="이력 필터" />
+        <div id="recall-filter-field" class="clear-field">
+          <input id="recall-filter" type="text" spellcheck="false" autocomplete="off" placeholder="필터" aria-label="이력 필터" />
+          <button type="button" class="field-x" title="지우기" aria-label="지우기" hidden>×</button>
+        </div>
         <button id="recall-clear" type="button" title="이력 지우기" aria-label="이력 지우기" disabled>지우기</button>
       </div>
       <div id="recall-list"></div>
@@ -143,11 +183,18 @@
   </div>
   <div id="assist" role="listbox" hidden></div>
   <div id="pick" role="menu" hidden>
-    <button type="button" role="menuitem">커서에 붙이기</button>
+    <button type="button" role="menuitem" data-act="copy">복사</button>
+    <button type="button" role="menuitem" data-act="paste">커서에 붙이기</button>
+    <button type="button" role="menuitem" data-act="printBus" hidden>print bus 실행</button>
+    <button type="button" role="menuitem" data-act="expandBus" hidden>expand bus 입력</button>
   </div>
   <div id="row-menu" role="menu" hidden>
+    <button type="button" role="menuitem" data-act="print">print 실행</button>
     <button type="button" role="menuitem" data-act="insert">입력</button>
     <button type="button" role="menuitem" data-act="copy">복사</button>
+  </div>
+  <div id="composer-menu" role="menu" hidden>
+    <button id="line-numbers" type="button" role="menuitemcheckbox" aria-checked="false">줄 번호</button>
   </div>
   <script src="{{js}}"></script>
 </body>

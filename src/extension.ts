@@ -6,6 +6,7 @@ const batchNotice = '배치가 표준 입력을 넘기지 못해 프롬프트가
 const contextCommand = 'set context user creator;';
 const prefsKey = 'enovia-mql.prefs';
 const maxRecalls = 200;
+const bootTimeoutMs = 1500;
 
 type Block = {
   id: number;
@@ -31,6 +32,7 @@ type SavedPrefs = {
   composerHidden: boolean;
   historyHidden: boolean;
   drawerLane: '' | SideLane;
+  helpTopic: string;
   listKind: string;
 };
 
@@ -42,17 +44,21 @@ type Outbound =
       blocks: Block[];
       notices: string[];
       prefs: SavedPrefs;
+      runningId?: number;
     }
   | { type: 'block'; id: number; command: string }
+  | { type: 'blockDone'; id: number }
   | { type: 'chunk'; id: number; text: string }
   | { type: 'cleared' }
   | { type: 'input'; enabled: boolean }
   | { type: 'clearEnabled'; enabled: boolean }
   | { type: 'suggest' }
   | { type: 'format' }
+  | { type: 'joinLines' }
   | { type: 'sideStart'; lane: SideLane; token: number }
   | { type: 'sideChunk'; lane: SideLane; token: number; text: string }
-  | { type: 'sideEnd'; lane: SideLane; token: number };
+  | { type: 'sideEnd'; lane: SideLane; token: number }
+  | { type: 'jpoPicked'; path: string };
 
 export function activate(context: vscode.ExtensionContext) {
   const host = new MqlHost(context.extensionUri, context.globalState);
@@ -71,6 +77,9 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand('enovia-mql.format', () => {
       host.format();
+    }),
+    vscode.commands.registerCommand('enovia-mql.joinLines', () => {
+      host.joinLines();
     }),
     status,
     host,
@@ -118,13 +127,18 @@ class MqlHost implements vscode.Disposable {
   }
 
   suggest() {
-    const view = this.views.find((item) => item.focused());
+    const view = this.views.find((item) => item.focused()) ?? this.views[this.views.length - 1];
     view?.suggest();
   }
 
   format() {
-    const view = this.views.find((item) => item.focused());
+    const view = this.views.find((item) => item.focused()) ?? this.views[this.views.length - 1];
     view?.format();
+  }
+
+  joinLines() {
+    const view = this.views.find((item) => item.focused()) ?? this.views[this.views.length - 1];
+    view?.joinLines();
   }
 }
 
@@ -136,7 +150,16 @@ class MqlView implements vscode.Disposable {
   private inputEnabled = false;
   private holding = false;
   private closeAfterEnd = false;
+  private booting = false;
+  private recovering = false;
+  private lastContextCommand = '';
+  private verbOn = false;
+  private bootQueue: string[] = [];
+  private commandQueue: string[] = [];
+  private pendingSide: { lane: SideLane; text: string; token: number } | undefined;
+  private bootTimer: ReturnType<typeof setTimeout> | undefined;
   private activeId: number | undefined;
+  private blockOpen = false;
   private sideLane: SideLane | undefined;
   private sideToken = 0;
   private nextId = 0;
@@ -165,6 +188,7 @@ class MqlView implements vscode.Disposable {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearTimers();
     this.panelListeners?.dispose();
     this.panelListeners = undefined;
     const panel = this.panel;
@@ -184,6 +208,10 @@ class MqlView implements vscode.Disposable {
 
   format() {
     this.post({ type: 'format' });
+  }
+
+  joinLines() {
+    this.post({ type: 'joinLines' });
   }
 
   open() {
@@ -227,9 +255,18 @@ class MqlView implements vscode.Disposable {
 
   private begin() {
     if (this.session.running) return;
+    this.clearTimers();
+    this.booting = true;
+    this.recovering = false;
+    this.bootQueue = [];
+    this.commandQueue = [];
+    this.cancelPendingSide();
+    this.lastContextCommand = '';
+    this.verbOn = false;
     this.finishSide(false);
     this.inputEnabled = false;
     this.holding = false;
+    this.blockOpen = false;
     this.activeId = undefined;
     this.notices = [];
     this.postState();
@@ -260,23 +297,62 @@ class MqlView implements vscode.Disposable {
       this.savePrefs(message.prefs);
       return;
     }
+    if (message.type === 'pickJpo') {
+      void this.onPickJpo();
+      return;
+    }
     if (message.type === 'clear') this.onClear();
     if (message.type === 'restart') this.onRestart();
   }
 
+  private async onPickJpo() {
+    const activeUri = vscode.window.activeTextEditor?.document.uri;
+    const defaultUri = activeUri?.scheme === 'file' ? activeUri : undefined;
+    const uris = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      canSelectFiles: true,
+      canSelectFolders: false,
+      defaultUri,
+      filters: {
+        'JPO Java Files': ['java'],
+        'All Files': ['*'],
+      },
+      title: 'JPO 파일 선택',
+    });
+    const picked = uris?.[0]?.fsPath;
+    if (picked) this.post({ type: 'jpoPicked', path: picked });
+  }
+
   private onSend(text: string) {
-    if (!this.inputEnabled || this.sideLane) return;
+    if (this.sideLane) return;
+    if (this.holding || this.booting || this.recovering || !this.inputEnabled) {
+      if (this.holding || this.booting || this.recovering) this.commandQueue.push(text);
+      return;
+    }
     this.sendCommand(text);
   }
 
   private onSide(lane: SideLane, text: string, token: number) {
     const command = sideCommand(lane, text);
-    if (!command || !this.inputEnabled || this.holding || this.sideLane || !this.session.canSend() || !this.session.arm()) {
+    if (!command || this.sideLane) {
       this.post({ type: 'sideEnd', lane, token });
       return;
     }
-    if (!this.session.send(command)) {
+    if (this.booting || this.recovering || this.holding || !this.inputEnabled) {
+      if (this.booting || this.recovering || this.holding) {
+        this.pendingSide = { lane, text, token };
+        return;
+      }
       this.post({ type: 'sideEnd', lane, token });
+      return;
+    }
+    this.beginSide(lane, command, token, text);
+  }
+
+  private beginSide(lane: SideLane, command: string, token: number, raw: string) {
+    if (!this.session.canSend() || !this.session.arm()) {
+      this.pendingSide = { lane, text: raw, token };
+      if (!this.booting) this.recoverSession();
       return;
     }
     this.sideLane = lane;
@@ -285,25 +361,67 @@ class MqlView implements vscode.Disposable {
     this.post({ type: 'sideStart', lane, token });
     this.post({ type: 'input', enabled: false });
     this.postClear();
+    if (!this.session.send(command)) {
+      this.pendingSide = { lane, text: raw, token };
+      this.recoverSession();
+    }
+  }
+
+  private cancelPendingSide() {
+    const side = this.pendingSide;
+    this.pendingSide = undefined;
+    if (!side || this.sideLane) return;
+    this.post({ type: 'sideEnd', lane: side.lane, token: side.token });
   }
 
   private sendCommand(text: string) {
     const command = withSemicolon(text);
-    if (!command || !this.session.canSend()) return;
-    if (!this.session.send(command)) return;
+    if (!command) return;
+    if (this.holding) {
+      this.commandQueue.unshift(text);
+      return;
+    }
+    if (!this.session.canSend() || !this.session.arm()) {
+      if (!this.booting) this.commandQueue.unshift(text);
+      this.recoverSession();
+      return;
+    }
     this.closeAfterEnd = isSessionEnd(command);
     const block: Block = { id: ++this.nextId, command, result: '' };
     this.blocks.push(block);
     this.activeId = block.id;
-    this.holding = this.session.arm();
+    this.blockOpen = true;
+    this.holding = true;
     this.post({ type: 'block', id: block.id, command: block.command });
     this.postClear();
+    if (!this.session.send(command)) {
+      this.settleHistoryBlock();
+      this.holding = false;
+      this.activeId = undefined;
+      if (!this.booting) this.commandQueue.unshift(text);
+      this.recoverSession();
+      return;
+    }
+    if (this.booting) this.scheduleBootTimeout();
   }
 
   private onRestart() {
+    this.clearTimers();
     this.closeAfterEnd = false;
+    this.recovering = false;
+    this.commandQueue = [];
+    this.cancelPendingSide();
     this.finishSide(false);
     this.holding = false;
+    this.blocks = [];
+    this.nextId = 0;
+    this.activeId = undefined;
+    this.savePrefs({
+      ...this.getPrefs(),
+      recalls: [],
+      jpoPath: '',
+      commandText: '',
+    });
     this.session.stop();
     this.begin();
   }
@@ -311,11 +429,13 @@ class MqlView implements vscode.Disposable {
   private onClear() {
     if (!this.clearEnabled()) return;
     this.blocks = [];
+    this.blockOpen = false;
     this.activeId = undefined;
     this.post({ type: 'cleared' });
   }
 
   private onOutput(text: string) {
+    if (this.booting) this.scheduleBootTimeout();
     if (this.sideLane) {
       this.post({ type: 'sideChunk', lane: this.sideLane, token: this.sideToken, text });
       return;
@@ -328,15 +448,31 @@ class MqlView implements vscode.Disposable {
   }
 
   private onReadySession() {
+    if (this.booting) {
+      this.scheduleBootTimeout();
+      return;
+    }
     this.inputEnabled = true;
-    this.post({ type: 'input', enabled: true });
+    this.post({ type: 'input', enabled: !this.sideLane });
   }
 
   private onReleased() {
+    this.clearTimers();
+    this.settleHistoryBlock();
+    if (this.booting) {
+      this.noteActiveCommand();
+      this.holding = false;
+      this.activeId = undefined;
+      this.postClear();
+      this.sendBootNext();
+      return;
+    }
+    this.noteActiveCommand();
     const side = this.sideLane != null;
     this.holding = false;
     this.finishSide(side);
     this.postClear();
+    this.flushPending();
   }
 
   private finishSide(restoreInput: boolean) {
@@ -350,23 +486,158 @@ class MqlView implements vscode.Disposable {
 
   private onFailed() {
     if (this.consumeClose()) return;
+    this.clearTimers();
+    this.booting = false;
+    this.recovering = false;
+    this.bootQueue = [];
+    this.commandQueue = [];
+    this.cancelPendingSide();
     this.finishSide(false);
-    this.blocks = [];
-    this.notices = [failNotice];
+    if (this.blocks.length === 0) this.notices = [failNotice];
     this.inputEnabled = false;
     this.holding = false;
+    this.blockOpen = false;
     this.activeId = undefined;
     this.postState();
   }
 
   private onEnded(text?: string) {
     if (this.consumeClose()) return;
+    if (this.blocks.length > 0 || this.inputEnabled || (this.recovering && this.holding)) {
+      this.recoverSession();
+      return;
+    }
+    this.clearTimers();
+    this.booting = false;
+    this.recovering = false;
+    this.bootQueue = [];
     this.finishSide(false);
     this.inputEnabled = false;
     this.holding = false;
+    this.blockOpen = false;
     this.activeId = undefined;
     if (text && this.blocks.length === 0) this.notices = [text];
     this.postState();
+  }
+
+  private scheduleBootTimeout() {
+    this.clearBootTimer();
+    this.bootTimer = setTimeout(() => {
+      this.bootTimer = undefined;
+      if (!this.booting || this.disposed) return;
+      if (this.holding) {
+        this.inputEnabled = true;
+        this.post({ type: 'input', enabled: !this.sideLane });
+        this.postClear();
+        return;
+      }
+      this.finishBoot();
+    }, bootTimeoutMs);
+  }
+
+  private clearBootTimer() {
+    if (!this.bootTimer) return;
+    clearTimeout(this.bootTimer);
+    this.bootTimer = undefined;
+  }
+
+  private clearTimers() {
+    this.clearBootTimer();
+  }
+
+  private recoverSession() {
+    if (this.disposed || this.closeAfterEnd) return;
+    this.clearTimers();
+    const side = this.sideLane != null;
+    this.settleHistoryBlock();
+    this.activeId = undefined;
+    this.holding = false;
+    this.finishSide(side);
+    this.booting = true;
+    this.recovering = true;
+    this.bootQueue = [];
+    this.inputEnabled = false;
+    this.post({ type: 'input', enabled: false });
+    this.postClear();
+    this.session.stop();
+    this.session.start();
+  }
+
+  private sendBootNext() {
+    const next = this.bootQueue.shift();
+    if (!next) {
+      this.finishBoot();
+      return;
+    }
+    if (this.recovering) {
+      this.sendSilent(next);
+      return;
+    }
+    this.sendCommand(next);
+  }
+
+  private sendSilent(text: string) {
+    const command = withSemicolon(text);
+    if (!command || !this.session.canSend() || !this.session.arm()) {
+      if (this.recovering) this.finishBoot();
+      else this.recoverSession();
+      return;
+    }
+    this.activeId = undefined;
+    this.holding = true;
+    this.postClear();
+    if (!this.session.send(command)) {
+      this.holding = false;
+      if (this.recovering) this.finishBoot();
+      else this.recoverSession();
+      return;
+    }
+    if (this.booting) this.scheduleBootTimeout();
+  }
+
+  private finishBoot() {
+    if (this.disposed) return;
+    this.clearTimers();
+    this.booting = false;
+    this.recovering = false;
+    this.bootQueue = [];
+    this.inputEnabled = true;
+    this.post({ type: 'input', enabled: !this.sideLane });
+    this.postClear();
+    if (!this.holding) this.flushPending();
+  }
+
+  private noteActiveCommand() {
+    if (this.activeId == null) return;
+    const block = this.blocks.find((item) => item.id === this.activeId);
+    if (block && !hasMqlError(block.result)) this.trackSessionSetting(block.command);
+  }
+
+  private flushPending() {
+    if (this.holding || this.booting || this.recovering || this.sideLane || !this.inputEnabled) return;
+    const cmd = this.commandQueue.shift();
+    if (cmd) {
+      this.sendCommand(cmd);
+      return;
+    }
+    const side = this.pendingSide;
+    this.pendingSide = undefined;
+    if (side) this.onSide(side.lane, side.text, side.token);
+  }
+
+  private trackSessionSetting(command: string) {
+    const norm = command.trim().replace(/\s+/g, ' ');
+    if (/^set context\b/i.test(norm)) {
+      this.lastContextCommand = norm;
+      return;
+    }
+    if (/^verb(?:ose)? on\s*;$/i.test(norm)) {
+      this.verbOn = true;
+      return;
+    }
+    if (/^verb(?:ose)? off\s*;$/i.test(norm)) {
+      this.verbOn = false;
+    }
   }
 
   private consumeClose() {
@@ -388,11 +659,23 @@ class MqlView implements vscode.Disposable {
       this.notices = next;
       this.postState();
     }
-    this.sendCommand(contextCommand);
+    if (!this.booting) return;
+    this.bootQueue = [];
+    const ctx = this.recovering ? this.lastContextCommand : contextCommand;
+    if (ctx) this.bootQueue.push(ctx);
+    if (this.verbOn) this.bootQueue.push('verb on;');
+    this.sendBootNext();
+  }
+
+  private settleHistoryBlock() {
+    if (!this.blockOpen || this.sideLane || this.activeId == null) return;
+    const id = this.activeId;
+    this.blockOpen = false;
+    this.post({ type: 'blockDone', id });
   }
 
   private clearEnabled() {
-    return this.blocks.length > 0 && !this.holding;
+    return this.blocks.length > 0;
   }
 
   private postClear() {
@@ -407,6 +690,7 @@ class MqlView implements vscode.Disposable {
       blocks: this.blocks.map((block) => ({ ...block })),
       notices: [...this.notices],
       prefs: this.getPrefs(),
+      runningId: this.blockOpen && !this.sideLane ? this.activeId : undefined,
     });
   }
 
@@ -428,6 +712,7 @@ function defaultPrefs(): SavedPrefs {
     composerHidden: false,
     historyHidden: false,
     drawerLane: '',
+    helpTopic: '',
     listKind: 'type',
   };
 }
@@ -462,6 +747,9 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
   const drawerLane = value.drawerLane === 'help' || value.drawerLane === 'list' || value.drawerLane === ''
     ? value.drawerLane
     : base.drawerLane;
+  const helpTopic = typeof value.helpTopic === 'string' && /^[a-z]*$/.test(value.helpTopic)
+    ? value.helpTopic
+    : base.helpTopic;
   const listKind = typeof value.listKind === 'string' && /^[a-z]+$/.test(value.listKind)
     ? value.listKind
     : base.listKind;
@@ -476,6 +764,7 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
     composerHidden: typeof value.composerHidden === 'boolean' ? value.composerHidden : base.composerHidden,
     historyHidden: typeof value.historyHidden === 'boolean' ? value.historyHidden : base.historyHidden,
     drawerLane,
+    helpTopic,
     listKind,
   };
 }
@@ -497,7 +786,11 @@ function isSessionEnd(command: string) {
 
 function sideCommand(lane: SideLane, text: string) {
   const command = withSemicolon(text);
-  if (lane === 'help' && command === 'help;') return command;
+  if (lane === 'help' && /^help(?: [a-z]+)?;$/.test(command)) return command;
   if (lane === 'list' && /^list [a-z]+;$/.test(command)) return command;
   return '';
+}
+
+function hasMqlError(text: string) {
+  return /(?:^|\r|\n)\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:|(?:Enter\s+)?Password\s*:\s*$)/i.test(text);
 }
