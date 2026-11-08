@@ -75,7 +75,21 @@ const cfModeGrid = document.getElementById('cf-mode-grid');
 const cfRows = document.getElementById('cf-rows');
 const cfRowsBody = cfRows.tBodies[0];
 const cfAddRow = document.getElementById('cf-add-row');
+const railEdit = document.getElementById('rail-edit');
+const editView = document.getElementById('edit-view');
+const efOid = document.getElementById('ef-oid');
+const efType = document.getElementById('ef-type');
+const efPolicy = document.getElementById('ef-policy');
+const efVault = document.getElementById('ef-vault');
+const efState = document.getElementById('ef-state');
+const efAttrs = document.getElementById('ef-attrs');
+const efNote = document.getElementById('ef-note');
+const efPreview = document.getElementById('ef-preview');
+const efDelete = document.getElementById('ef-delete');
+const efInsert = document.getElementById('ef-insert');
+const efRun = document.getElementById('ef-run');
 const collapsed = new Set();
+const gridOn = new Set();
 const blockText = new Map();
 const FIND_WORD_SEPARATORS = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 let findQuery = '';
@@ -318,6 +332,7 @@ function recomputeTx(blocks) {
   txActive = false;
   for (const block of blocks) {
     updateTxFromCommand(block.command, hasErrorLine(cleanResult(block.result || '')));
+    if (block.reset) txActive = false;
   }
   syncTx();
 }
@@ -368,6 +383,7 @@ function setInputEnabled(enabled) {
     if (!drawer.contains(active)) command.focus();
   }
   syncCreate();
+  syncEdit();
   if (!enabled) return;
   flushQueuedSide();
   pumpMeta();
@@ -530,8 +546,10 @@ function cleanResult(raw) {
   return kept.join('\n');
 }
 
+const ERROR_LINE = /^\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/im;
+
 function hasErrorLine(text) {
-  return /(?:^|\n)\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/i.test(text);
+  return ERROR_LINE.test(text);
 }
 
 function paintResult(node, raw) {
@@ -551,7 +569,7 @@ function paintResult(node, raw) {
   for (let i = 0; i < lines.length; i += 1) {
     if (i > 0) frag.append(document.createTextNode('\n'));
     const line = lines[i];
-    if (/^\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/i.test(line)) {
+    if (ERROR_LINE.test(line)) {
       const span = document.createElement('span');
       span.className = 'res-err';
       span.textContent = line;
@@ -594,6 +612,7 @@ function pruneBlockState() {
   for (const item of history.querySelectorAll('.block')) ids.add(item.dataset.id);
   for (const id of blockText.keys()) if (!ids.has(id)) blockText.delete(id);
   for (const id of collapsed) if (!ids.has(id)) collapsed.delete(id);
+  for (const id of gridOn) if (!ids.has(id)) gridOn.delete(id);
 }
 
 function setFolded(block, folded) {
@@ -611,6 +630,7 @@ function setFolded(block, folded) {
 function revealHit(mark) {
   const block = mark.closest('.block');
   if (block && mark.closest('.result') && block.classList.contains('collapsed')) setFolded(block, false);
+  if (block && mark.closest('.result') && block.classList.contains('grid')) setGrid(block, false);
   scrollToNode(mark);
 }
 
@@ -671,7 +691,6 @@ let paintCost = 0;
 function queuePaint(id) {
   paintQueue.add(String(id));
   if (paintFrame || paintTimer) return;
-  // 직전 그리기에 걸린 시간의 4배만큼 쉬어서 대용량 출력 중에도 UI가 응답하도록 한다.
   const wait = Math.min(1000, paintCost * 4);
   if (wait > 16) paintTimer = setTimeout(() => {
     paintTimer = 0;
@@ -743,7 +762,7 @@ function blockNode(block) {
   const id = String(block.id);
   const commandText = block.command;
   const resultRaw = block.result || '';
-  blockText.set(id, { command: commandText, result: resultRaw });
+  blockText.set(id, { command: commandText, result: resultRaw, reset: block.reset === true });
   const item = document.createElement('div');
   item.className = 'block';
   item.dataset.id = id;
@@ -782,13 +801,156 @@ function blockNode(block) {
   rerunBtn.setAttribute('aria-label', '다시 실행');
   rerunBtn.disabled = command.disabled || sideBusy;
   rerunBtn.append(recallIcon('M4.5 2.5v11l9-5.5z'));
-  actions.append(copyBtn, rerunBtn);
+  const stopBtn = document.createElement('button');
+  stopBtn.type = 'button';
+  stopBtn.className = 'block-stop';
+  stopBtn.title = '실행 중단';
+  stopBtn.setAttribute('aria-label', '실행 중단');
+  stopBtn.append(recallIcon('M4 4h8v8H4z'));
+  const gridBtn = document.createElement('button');
+  gridBtn.type = 'button';
+  gridBtn.className = 'block-grid';
+  gridBtn.hidden = true;
+  gridBtn.append(recallIcon('M2 3h12v10H2V3zm1 1v2h4V4H3zm5 0v2h5V4H8zM3 7v2h4V7H3zm5 0v2h5V7H8zm-5 3v2h4v-2H3zm5 0v2h5v-2H8z'));
+  actions.append(gridBtn, copyBtn, rerunBtn, stopBtn);
   const result = document.createElement('pre');
   result.className = 'result';
   head.append(fold, button, actions);
   item.append(head, result, waitNode());
+  if (block.reset) item.append(resetNode());
   paintResult(result, resultRaw);
+  setGrid(item, gridOn.has(id));
+  syncGridButton(item);
   return item;
+}
+
+function resetNode() {
+  const node = document.createElement('p');
+  node.className = 'block-reset';
+  node.textContent = '세션을 다시 연결했습니다';
+  return node;
+}
+
+const BUS_HEAD = ['type', 'name', 'revision'];
+
+function dumpSeparator(cmd) {
+  const m = cmd.match(/\bdump\b(?:\s+(?:'([^']*)'|"([^"]*)"|([^\s;'"]+)))?/i);
+  if (!m) return '';
+  const sep = m[1] ?? m[2] ?? m[3];
+  return sep && !/^[a-z]+$/i.test(sep) ? sep : ',';
+}
+
+function selectNames(cmd) {
+  const m = cmd.match(/\bselect\s+([\s\S]*?)(?=\s+(?:dump|recordsep|tcl|output|where|orderby|limit)\b|\s*;|$)/i);
+  return m ? m[1].match(/(?:[^\s[\]'"]+|\[[^\]]*\]|'[^']*'|"[^"]*")+/g) || [] : [];
+}
+
+function dumpGrid(cmd, lines, sep) {
+  const rows = lines.map((line) => line.split(sep));
+  const width = Math.max(...rows.map((row) => row.length));
+  if (width < 2) return null;
+  const names = selectNames(cmd);
+  const lead = width - names.length;
+  const head = [];
+  for (let i = 0; i < width; i += 1) {
+    if (lead >= 0 && i >= lead) head.push(names[i - lead]);
+    else if (lead === BUS_HEAD.length) head.push(BUS_HEAD[i]);
+    else head.push(`#${i + 1}`);
+  }
+  return { head, rows };
+}
+
+function selectGrid(lines) {
+  const head = ['object'];
+  const index = new Map();
+  const rows = [];
+  let row = null;
+  let key = '';
+  for (const line of lines) {
+    if (!/^\s/.test(line)) {
+      row = [line.trim()];
+      rows.push(row);
+      key = '';
+      continue;
+    }
+    const kv = line.match(/^\s+([^\s=](?:[^=]*?[^\s=])?)\s*=\s?(.*)$/);
+    if (!kv) {
+      if (row && key) row[index.get(key)] += `\n${line.trim()}`;
+      continue;
+    }
+    if (!row) {
+      row = [''];
+      rows.push(row);
+    }
+    key = kv[1];
+    if (!index.has(key)) {
+      index.set(key, head.length);
+      head.push(key);
+    }
+    const at = index.get(key);
+    row[at] = row[at] == null ? kv[2] : `${row[at]}\n${kv[2]}`;
+  }
+  if (head.length < 2) return null;
+  if (rows.length !== 1) return { head, rows };
+  return { head: ['key', 'value'], rows: head.map((name, i) => [name, rows[0][i] ?? '']) };
+}
+
+function gridOf(stored) {
+  const text = cleanResult(stored.result);
+  if (!text || hasErrorLine(text)) return null;
+  const lines = text.split('\n').filter((line) => line.trim() !== '');
+  const sep = dumpSeparator(stored.command);
+  return sep ? dumpGrid(stored.command, lines, sep) : selectGrid(lines);
+}
+
+function gridTsv(grid) {
+  const cell = (value) => (/[\t\n"]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+  return [grid.head, ...grid.rows].map((row) => grid.head.map((_, i) => cell(row[i] ?? '')).join('\t')).join('\n');
+}
+
+function gridNode(grid) {
+  const wrap = document.createElement('div');
+  wrap.className = 'result-grid';
+  const table = document.createElement('table');
+  const headRow = table.createTHead().insertRow();
+  for (const name of grid.head) {
+    const cell = document.createElement('th');
+    cell.textContent = name;
+    headRow.append(cell);
+  }
+  const body = table.createTBody();
+  for (const row of grid.rows) {
+    const line = body.insertRow();
+    for (let i = 0; i < grid.head.length; i += 1) line.insertCell().textContent = row[i] ?? '';
+  }
+  wrap.append(table);
+  return wrap;
+}
+
+function setGrid(block, on) {
+  const id = block.dataset.id;
+  const stored = blockText.get(id);
+  const grid = on && stored && !block.classList.contains('pending') ? gridOf(stored) : null;
+  block.querySelector('.result-grid')?.remove();
+  if (grid) {
+    gridOn.add(id);
+    block.querySelector('.result').after(gridNode(grid));
+  } else gridOn.delete(id);
+  block.classList.toggle('grid', grid != null);
+  const gridBtn = block.querySelector('.block-grid');
+  const label = grid ? '텍스트로 보기' : '표로 보기';
+  gridBtn.title = label;
+  gridBtn.setAttribute('aria-label', label);
+  gridBtn.setAttribute('aria-pressed', grid ? 'true' : 'false');
+  const copyLabel = grid ? '표 복사 (TSV)' : '결과 복사';
+  const copyBtn = block.querySelector('.block-copy');
+  copyBtn.title = copyLabel;
+  copyBtn.setAttribute('aria-label', copyLabel);
+}
+
+function syncGridButton(item) {
+  const stored = blockText.get(item.dataset.id);
+  item.querySelector('.block-grid').hidden = !stored || item.classList.contains('pending') || gridOf(stored) == null;
 }
 
 function sameCommand(a, b) {
@@ -904,7 +1066,7 @@ function hydratePrefs(prefs) {
     listKind.value = prefs.listKind;
     sentKind = listKind.value;
   }
-  if (prefs.drawerLane === 'help' || prefs.drawerLane === 'list' || prefs.drawerLane === 'create') {
+  if (prefs.drawerLane === 'help' || prefs.drawerLane === 'list' || prefs.drawerLane === 'create' || prefs.drawerLane === 'edit') {
     drawerLane = prefs.drawerLane;
     setDrawerOpen(true);
   }
@@ -1841,8 +2003,8 @@ function resultSelection() {
   const anchor = anchorNode instanceof Element ? anchorNode : anchorNode?.parentElement;
   const focus = focusNode instanceof Element ? focusNode : focusNode?.parentElement;
   if (!anchor || !focus) return '';
-  const anchorResult = anchor.closest('.result');
-  const focusResult = focus.closest('.result');
+  const anchorResult = anchor.closest('.result, .result-grid');
+  const focusResult = focus.closest('.result, .result-grid');
   if (!anchorResult || anchorResult !== focusResult || !history.contains(anchorResult)) return '';
   return text;
 }
@@ -1917,6 +2079,9 @@ function openPick(x, y, inResult = true) {
     expandBtn.hidden = !oid;
     expandBtn.disabled = command.disabled;
   }
+  const editBtn = pick.querySelector('[data-act="editBus"]');
+  editBtn.hidden = !oid;
+  editBtn.disabled = command.disabled;
   placeFixed(pick, x, y);
 }
 
@@ -1974,6 +2139,7 @@ function syncRail() {
   railHelp.setAttribute('aria-pressed', open && drawerLane === 'help' ? 'true' : 'false');
   railList.setAttribute('aria-pressed', open && drawerLane === 'list' ? 'true' : 'false');
   railCreate.setAttribute('aria-pressed', open && drawerLane === 'create' ? 'true' : 'false');
+  railEdit.setAttribute('aria-pressed', open && drawerLane === 'edit' ? 'true' : 'false');
   drawer.inert = !open;
   drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
 }
@@ -2093,6 +2259,8 @@ function setDrawerOpen(open) {
   syncHistory();
   if (open && drawerLane === 'create') {
     void loadCreateLists(false);
+  } else if (open && drawerLane === 'edit') {
+    if (efOrigin.size === 0) setEditNote('결과의 객체 ID를 우클릭하거나 ID를 입력하고 조회를 누르세요.');
   } else if (open && !sideBusy) {
     const fetched = drawerLane === 'help'
       ? helpFetchedTopic === helpTopic.value
@@ -2116,6 +2284,7 @@ function refreshDrawer() {
   if (drawerRefresh.disabled) return;
   if (drawerLane === 'help') requestSide('help', helpText());
   else if (drawerLane === 'create') void loadCreateLists(true);
+  else if (drawerLane === 'edit') void loadEdit();
   else requestSide('list', `list ${listKind.value}`);
 }
 
@@ -2328,20 +2497,25 @@ async function loadType() {
     cfPolicyAuto = true;
     void loadPolicy();
   }
-  for (let i = 0; i < attrs.length; i += 1) {
-    if (attrMeta.has(attrs[i])) continue;
-    setCreateNote(`속성 정보 조회 중 (${i + 1}/${attrs.length})`);
-    const meta = await requestMeta(`print attribute '${attrs[i]}' select type default range`);
-    if (cfTypeLoaded !== type) return;
-    attrMeta.set(attrs[i], {
+  if (!(await loadAttrMeta(attrs, () => cfTypeLoaded === type, setCreateNote))) return;
+  renderAttrs(attrs);
+  setCreateNote(attrs.length === 0 ? '속성이 없습니다.' : '');
+  syncCreate();
+}
+
+async function loadAttrMeta(names, alive, note) {
+  for (let i = 0; i < names.length; i += 1) {
+    if (attrMeta.has(names[i])) continue;
+    note(`속성 정보 조회 중 (${i + 1}/${names.length})`);
+    const meta = await requestMeta(`print attribute '${names[i]}' select type default range`);
+    if (!alive()) return false;
+    attrMeta.set(names[i], {
       type: selectValues(meta, 'type')?.[0] || '',
       def: selectValues(meta, 'default')?.[0] || '',
       ranges: (selectValues(meta, 'range') || []).flatMap(rangeValue),
     });
   }
-  renderAttrs(attrs);
-  setCreateNote(attrs.length === 0 ? '속성이 없습니다.' : '');
-  syncCreate();
+  return true;
 }
 
 async function loadPolicy() {
@@ -2436,6 +2610,17 @@ function renderGridHead() {
   cfRows.tHead.rows[0].replaceChildren(...cells);
 }
 
+function attrField(name, id) {
+  const meta = attrMetaOf(name);
+  const control = attrControl(name, meta);
+  control.id = id;
+  const label = document.createElement('label');
+  label.htmlFor = id;
+  label.textContent = name;
+  label.title = meta.type ? `${name} (${meta.type})` : name;
+  return [label, control];
+}
+
 function renderAttrs(names) {
   const active = document.activeElement;
   const focusKey = active instanceof HTMLElement && createView.contains(active) && active.matches('[data-key], [data-attr]') ? controlKey(active) : '';
@@ -2444,16 +2629,7 @@ function renderAttrs(names) {
   cfAttrNames = names;
   const kept = readControls(cfAttrs);
   const nodes = [];
-  for (const name of names) {
-    const meta = attrMetaOf(name);
-    const control = attrControl(name, meta);
-    control.id = `cf-attr-${nodes.length}`;
-    const label = document.createElement('label');
-    label.htmlFor = control.id;
-    label.textContent = name;
-    label.title = meta.type ? `${name} (${meta.type})` : name;
-    nodes.push(label, control);
-  }
+  for (const name of names) nodes.push(...attrField(name, `cf-attr-${nodes.length}`));
   cfAttrs.replaceChildren(...nodes);
   fillControls(cfAttrs, kept);
   renderGridHead();
@@ -2532,6 +2708,125 @@ function removeGridRow(row) {
   syncCreate();
 }
 
+const EF_SELECT = 'type name revision policy vault current owner description attribute attribute.value';
+let efLoaded = '';
+let efOrigin = new Map();
+let efReload = '';
+
+function setEditNote(text) {
+  efNote.hidden = text === '';
+  efNote.textContent = text;
+}
+
+function busValues(raw) {
+  if (raw == null) return null;
+  const text = cleanResult(raw);
+  if (hasErrorLine(text)) return null;
+  const basics = new Map();
+  const attrs = new Map();
+  const names = [];
+  const values = [];
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*(attribute\[[^\]]+\]\.value|[\w.]+)\s=\s?(.*)$/);
+    if (!m) continue;
+    const named = m[1].match(/^attribute\[(.+)\]\.value$/);
+    if (named) attrs.set(named[1], m[2]);
+    else if (m[1] === 'attribute') names.push(m[2].trim());
+    else if (m[1] === 'attribute.value') values.push(m[2]);
+    else if (!basics.has(m[1])) basics.set(m[1], m[2]);
+  }
+  if (attrs.size === 0) names.forEach((name, i) => attrs.set(name, values[i] ?? ''));
+  return basics.size > 0 ? { basics, attrs } : null;
+}
+
+function renderEdit(data) {
+  const basics = data?.basics ?? new Map();
+  efType.value = basics.get('type') ?? '';
+  efPolicy.value = basics.get('policy') ?? '';
+  efVault.value = basics.get('vault') ?? '';
+  efState.value = basics.get('current') ?? '';
+  efOrigin = new Map(['name', 'revision', 'owner', 'description'].map((key) => [key, basics.get(key) ?? '']));
+  const nodes = [];
+  for (const [name, value] of data?.attrs ?? []) {
+    efOrigin.set(`@${name}`, value);
+    const [label, control] = attrField(name, `ef-attr-${nodes.length}`);
+    if (control instanceof HTMLSelectElement && ![...control.options].some((option) => option.value === value)) control.append(new Option(value, value));
+    nodes.push(label, control);
+  }
+  efAttrs.replaceChildren(...nodes);
+  fillControls(editView, efOrigin);
+  if (!data) efOrigin = new Map();
+  syncEdit();
+}
+
+async function loadEdit(oid = efOid.value.trim()) {
+  efOid.value = oid;
+  if (!isObjectId(oid)) {
+    setEditNote('객체 ID 형식이 아닙니다. (예: 1234.5678.9012.3456)');
+    return;
+  }
+  efLoaded = oid;
+  renderEdit(null);
+  setEditNote('객체 조회 중');
+  const data = busValues(await requestMeta(`print bus ${oid} select ${EF_SELECT}`));
+  if (efLoaded !== oid) return;
+  if (!data) {
+    setEditNote('객체를 조회하지 못했습니다.');
+    return;
+  }
+  const names = [...data.attrs.keys()];
+  if (!(await loadAttrMeta(names, () => efLoaded === oid, setEditNote))) return;
+  renderEdit(data);
+  setEditNote(names.length === 0 ? '속성이 없습니다.' : '');
+}
+
+function openEdit(oid) {
+  drawerLane = 'edit';
+  setDrawerOpen(true);
+  void loadEdit(oid);
+}
+
+function editLines() {
+  if (efOrigin.size === 0) return [];
+  const values = readControls(editView);
+  const changed = (key) => values.get(key) !== efOrigin.get(key);
+  const parts = [];
+  if (changed('name') || changed('revision')) parts.push(`name ${mqlQuote(values.get('name'))} revision ${mqlQuote(values.get('revision'))}`);
+  for (const [key, value] of values) {
+    if (key === 'name' || key === 'revision' || !changed(key)) continue;
+    parts.push(key.startsWith('@') ? `${mqlQuote(key.slice(1))} ${mqlQuote(value)}` : `${key} ${mqlQuote(value)}`);
+  }
+  if (parts.length === 0) return [];
+  parts[parts.length - 1] += ';';
+  return [`mod bus ${efLoaded}`, ...parts];
+}
+
+function syncEdit() {
+  const lines = editLines();
+  efPreview.textContent = lines.length > 0 ? lines.join('\n  ') : efOrigin.size > 0 ? '변경 사항이 없습니다.' : '';
+  efInsert.disabled = command.disabled || lines.length === 0;
+  efRun.disabled = command.disabled || sideBusy || lines.length === 0;
+  efDelete.disabled = command.disabled || sideBusy || efOrigin.size === 0;
+}
+
+function sendEdit(text, confirm) {
+  efReload = text;
+  vscode.postMessage({ type: 'send', text, confirm });
+}
+
+function reloadEditAfter(stored) {
+  if (!efReload || !sameCommand(stored.command, efReload)) return;
+  const removed = /^delete\b/i.test(efReload);
+  efReload = '';
+  if (hasErrorLine(cleanResult(stored.result))) return;
+  if (!removed) {
+    void loadEdit(efLoaded);
+    return;
+  }
+  renderEdit(null);
+  setEditNote('객체를 삭제했습니다.');
+}
+
 let stageGrow = '';
 
 function setComposerHidden(hidden) {
@@ -2590,7 +2885,6 @@ window.addEventListener('message', (event) => {
   if (message.type === 'chunk') {
     const stored = blockText.get(String(message.id));
     if (!stored) return;
-    // 텍스트만 누적하고 그리기는 프레임 단위로 모아서 한다(조각마다 전체를 다시 그리면 대용량 결과에서 프리징).
     stored.result += message.text;
     queuePaint(message.id);
     return;
@@ -2601,7 +2895,19 @@ window.addEventListener('message', (event) => {
     const stored = blockText.get(String(message.id));
     if (stored && hasErrorLine(cleanResult(stored.result))) recomputeAllTx();
     const item = blockById(String(message.id));
-    if (item) symbolicHint(item);
+    if (item) {
+      symbolicHint(item);
+      syncGridButton(item);
+    }
+    if (stored) reloadEditAfter(stored);
+    return;
+  }
+  if (message.type === 'reset') {
+    const stored = blockText.get(String(message.id));
+    if (stored) stored.reset = true;
+    const item = blockById(String(message.id));
+    if (item && !item.querySelector('.block-reset')) item.querySelector('.block-wait').after(resetNode());
+    recomputeAllTx();
     return;
   }
   if (message.type === 'cleared') {
@@ -2668,13 +2974,24 @@ history.addEventListener('click', (event) => {
     setFolded(block, !block.classList.contains('collapsed'));
     return;
   }
+  const gridBtn = target.closest('.block-grid');
+  if (gridBtn) {
+    const block = gridBtn.closest('.block');
+    if (block) setGrid(block, !block.classList.contains('grid'));
+    return;
+  }
   const copyBtn = target.closest('.block-copy');
   if (copyBtn) {
     const block = copyBtn.closest('.block');
     const stored = block ? blockText.get(block.dataset.id) : null;
     if (!stored) return;
-    const text = cleanResult(stored.result) || stored.command;
+    const grid = block.classList.contains('grid') ? gridOf(stored) : null;
+    const text = grid ? gridTsv(grid) : cleanResult(stored.result) || stored.command;
     if (text) vscode.postMessage({ type: 'copy', text });
+    return;
+  }
+  if (target.closest('.block-stop')) {
+    vscode.postMessage({ type: 'stop' });
     return;
   }
   const rerunBtn = target.closest('.block-rerun');
@@ -3417,6 +3734,10 @@ pick.addEventListener('mousedown', (event) => {
     if (!command.disabled) insertStatement(`expand bus ${text} recurse to all select bus id current;`);
     return;
   }
+  if (act === 'editBus' && isObjectId(text)) {
+    openEdit(text);
+    return;
+  }
   insertAtCaret(raw);
 });
 
@@ -3601,6 +3922,32 @@ railCreate.addEventListener('click', () => {
   toggleDrawer('create');
 });
 
+railEdit.addEventListener('click', () => {
+  toggleDrawer('edit');
+});
+
+editView.addEventListener('input', () => {
+  syncEdit();
+});
+
+efOid.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.isComposing) return;
+  event.preventDefault();
+  if (!drawerRefresh.disabled) void loadEdit();
+});
+
+efInsert.addEventListener('click', () => {
+  if (!efInsert.disabled) insertStatement(editLines().join('\n  '));
+});
+
+efRun.addEventListener('click', () => {
+  if (!efRun.disabled) sendEdit(editLines().join(' '), true);
+});
+
+efDelete.addEventListener('click', () => {
+  if (!efDelete.disabled) sendEdit(`delete bus ${efLoaded};`, false);
+});
+
 function isListed(list, value) {
   return [...list.options].some((option) => option.value === value);
 }
@@ -3739,8 +4086,13 @@ function resetView() {
   syncJpoPath();
   recallFilter.value = '';
   dismissedRecall.clear();
-  recallList.replaceChildren();
+  for (const row of [...recallList.children]) {
+    if (row.classList.contains('pinned')) row.dataset.id = '';
+    else row.remove();
+  }
+  applyRecallFilter();
   syncRecallClear();
+  efReload = '';
   helpFind.value = '';
   helpQuery = '';
   paintHelp(true, false);

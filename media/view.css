@@ -656,11 +656,14 @@ body[data-drawer="list"] #list-view {
 }
 
 #create-view,
-body[data-drawer="create"] #drawer-note {
+#edit-view,
+body[data-drawer="create"] #drawer-note,
+body[data-drawer="edit"] #drawer-note {
   display: none;
 }
 
-body[data-drawer="create"] #create-view {
+body[data-drawer="create"] #create-view,
+body[data-drawer="edit"] #edit-view {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -709,6 +712,11 @@ body[data-drawer="create"] #create-view {
   border-color: var(--vscode-focusBorder);
 }
 
+.cf-input[readonly] {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  background: transparent;
+}
+
 .cf-section {
   margin: 6px 0 0;
   padding-bottom: 2px;
@@ -721,16 +729,19 @@ body[data-drawer="create"] #create-view {
     );
 }
 
-#cf-note {
+#cf-note,
+#ef-note {
   margin: 0;
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
-#cf-note[hidden] {
+#cf-note[hidden],
+#ef-note[hidden] {
   display: none;
 }
 
-#cf-preview {
+#cf-preview,
+#ef-preview {
   margin: 0;
   padding: 6px 8px;
   border-radius: 2px;
@@ -750,8 +761,24 @@ body[data-drawer="create"] #create-view {
 
 #cf-mode,
 #cf-insert,
-#cf-run {
+#cf-run,
+#ef-oid,
+#ef-delete,
+#ef-insert,
+#ef-run {
   display: none;
+}
+
+body[data-drawer="edit"] #ef-oid {
+  display: block;
+  flex: 1 1 120px;
+}
+
+body[data-drawer="edit"] #ef-delete,
+body[data-drawer="edit"] #ef-insert,
+body[data-drawer="edit"] #ef-run {
+  display: block;
+  flex: 0 0 auto;
 }
 
 body[data-drawer="create"] #cf-mode {
@@ -772,6 +799,9 @@ body[data-drawer="create"] #cf-insert {
 #cf-mode button,
 #cf-insert,
 #cf-run,
+#ef-delete,
+#ef-insert,
+#ef-run,
 #cf-add-row {
   height: 22px;
   margin: 0;
@@ -797,23 +827,30 @@ body[data-drawer="create"] #cf-insert {
 }
 
 #cf-mode button[aria-pressed="true"],
-#cf-run {
+#cf-run,
+#ef-run {
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
 }
 
 #cf-mode button[aria-pressed="false"]:hover,
 #cf-insert:hover:not(:disabled),
+#ef-delete:hover:not(:disabled),
+#ef-insert:hover:not(:disabled),
 #cf-add-row:hover {
   background: var(--vscode-toolbar-hoverBackground);
 }
 
-#cf-run:hover:not(:disabled) {
+#cf-run:hover:not(:disabled),
+#ef-run:hover:not(:disabled) {
   background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
 }
 
 #cf-insert:disabled,
-#cf-run:disabled {
+#cf-run:disabled,
+#ef-delete:disabled,
+#ef-insert:disabled,
+#ef-run:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -1474,8 +1511,15 @@ body.composer-hidden #composer {
   pointer-events: auto;
 }
 
+.block.pending .block-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.block-grid,
 .block-copy,
-.block-rerun {
+.block-rerun,
+.block-stop {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1489,10 +1533,73 @@ body.composer-hidden #composer {
   cursor: pointer;
 }
 
+.block-grid:hover,
 .block-copy:hover,
-.block-rerun:hover:not(:disabled) {
+.block-rerun:hover:not(:disabled),
+.block-stop:hover {
   color: var(--vscode-foreground);
   background: var(--vscode-toolbar-hoverBackground);
+}
+
+.block-grid[aria-pressed="true"] {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+.block-stop,
+.block-grid[hidden],
+.block.pending .block-rerun {
+  display: none;
+}
+
+.block.pending .block-stop {
+  display: inline-flex;
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.block-reset {
+  margin: 0 10px 6px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.block.collapsed .block-reset,
+.block.collapsed .result-grid,
+.block.grid .result {
+  display: none;
+}
+
+.result-grid {
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px 10px;
+}
+
+.result-grid table {
+  border-collapse: collapse;
+  font-family: var(--vscode-editor-font-family), ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.result-grid th,
+.result-grid td {
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+  text-align: left;
+  vertical-align: top;
+  white-space: pre;
+}
+
+.result-grid th {
+  position: sticky;
+  top: 0;
+  font-weight: 600;
+  color: var(--vscode-symbolIcon-propertyForeground, var(--vscode-descriptionForeground));
+  background: var(--vscode-editor-background);
+}
+
+.result-grid tbody tr:hover {
+  background: var(--vscode-list-hoverBackground);
 }
 
 .block-hint {

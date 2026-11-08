@@ -5,7 +5,6 @@ const openDelayMs = 200;
 const promptDelayMs = 80;
 const immediateExitMs = 2000;
 const batchWaitMs = 20000;
-// 프롬프트로 응답 끝을 판단할 수 없을 때, 출력이 이 시간 동안 멈추면 응답이 끝난 것으로 본다.
 const quietMs = 1500;
 const startupLimit = 16384;
 
@@ -31,7 +30,6 @@ export class MqlSession {
   private sent = false;
   private prompt: string | undefined;
   private hold = false;
-  // 첫 프롬프트를 보기 전에 보낸 명령: 프롬프트만으로 끝을 판단할 수 없어 quiet 타이머로 마무리한다.
   private holdEarly = false;
   private parsing = false;
   private promptWait = false;
@@ -77,7 +75,6 @@ export class MqlSession {
     this.lines = { out: "", err: "" };
     this.trailPipe = undefined;
     this.startup = "";
-    // chcp 조회를 비동기(최초 1회 실행 후 캐시)로 처리해 확장 호스트가 멈추지 않게 한다.
     void consoleEncoding().then((label) => {
       if (generation !== this.generation) return;
       try {
@@ -205,7 +202,6 @@ export class MqlSession {
 
   private consume(text: string, pipe: Pipe) {
     if (!this.promptSeen) {
-      // 프롬프트가 없는 환경에서 무한히 쌓이지 않도록 끝부분만 유지한다(종료 안내용).
       this.startup += text;
       if (this.startup.length > startupLimit) this.startup = this.startup.slice(-startupLimit);
     }
@@ -316,7 +312,6 @@ export class MqlSession {
   private scheduleQuiet() {
     if (this.quietTimer) clearTimeout(this.quietTimer);
     this.quietTimer = undefined;
-    // 프롬프트 규칙이 확립된 뒤의 정상 hold는 프롬프트만으로 판단한다.
     if (!this.hold || (this.promptSeen && !this.holdEarly)) return;
     const generation = this.generation;
     this.quietTimer = setTimeout(() => {

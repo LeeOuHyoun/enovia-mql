@@ -47,10 +47,4 @@ declare module 'node:child_process' {
     options: { windowsHide?: boolean },
     callback: (error: Error | null, stdout: string | Uint8Array, stderr: string | Uint8Array) => void,
   ): ChildProcess;
-
-  export function execFileSync(
-    file: string,
-    args: readonly string[],
-    options: { windowsHide?: boolean; encoding: 'utf8' },
-  ): string;
 }

@@ -77,6 +77,12 @@
         </svg>
         <span>create</span>
       </button>
+      <button id="rail-edit" type="button" title="객체 편집 (mod bus)" aria-pressed="false">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path fill="currentColor" d="M11.3 1.8 14.2 4.7 5.6 13.3 2 14l.7-3.6 8.6-8.6zm0 2-6.9 6.9-.3 1.3 1.3-.3 6.9-6.9-1-1z" />
+        </svg>
+        <span>edit</span>
+      </button>
     </div>
     <aside id="drawer" aria-hidden="true">
       <div id="drawer-pane">
@@ -115,6 +121,7 @@
             <button id="cf-mode-one" type="button" aria-pressed="true">단건</button>
             <button id="cf-mode-grid" type="button" aria-pressed="false">그리드</button>
           </div>
+          <input id="ef-oid" class="cf-input" type="text" spellcheck="false" autocomplete="off" placeholder="객체 ID" aria-label="객체 ID" />
           <button id="drawer-refresh" type="button" title="조회" aria-label="조회" disabled>조회</button>
           <button id="drawer-close" type="button" title="접기" aria-label="접기">접기</button>
           <button id="drawer-wide" type="button" title="전체 너비" aria-label="전체 너비" aria-pressed="false">
@@ -127,6 +134,9 @@
           </button>
           <button id="cf-insert" type="button">입력창에 넣기</button>
           <button id="cf-run" type="button" disabled>실행</button>
+          <button id="ef-delete" type="button" disabled>삭제</button>
+          <button id="ef-insert" type="button" disabled>입력창에 넣기</button>
+          <button id="ef-run" type="button" disabled>저장</button>
         </div>
         <p id="drawer-note" hidden></p>
         <pre id="help-view"></pre>
@@ -167,6 +177,31 @@
           <datalist id="cf-policies"></datalist>
           <datalist id="cf-vaults"></datalist>
           <datalist id="cf-states"></datalist>
+        </div>
+        <div id="edit-view">
+          <div class="cf-grid">
+            <label for="ef-type">Type</label>
+            <input id="ef-type" class="cf-input" readonly />
+            <label for="ef-name">Name</label>
+            <input id="ef-name" class="cf-input" data-key="name" spellcheck="false" autocomplete="off" />
+            <label for="ef-rev">Revision</label>
+            <input id="ef-rev" class="cf-input" data-key="revision" spellcheck="false" autocomplete="off" />
+            <label for="ef-policy">Policy</label>
+            <input id="ef-policy" class="cf-input" readonly />
+            <label for="ef-vault">Vault</label>
+            <input id="ef-vault" class="cf-input" readonly />
+            <label for="ef-state">State</label>
+            <input id="ef-state" class="cf-input" readonly />
+            <label for="ef-owner">Owner</label>
+            <input id="ef-owner" class="cf-input" data-key="owner" spellcheck="false" autocomplete="off" />
+            <label for="ef-desc">Description</label>
+            <input id="ef-desc" class="cf-input" data-key="description" spellcheck="false" autocomplete="off" />
+          </div>
+          <p class="cf-section">속성</p>
+          <div id="ef-attrs" class="cf-grid"></div>
+          <p id="ef-note" hidden></p>
+          <p class="cf-section">미리보기</p>
+          <pre id="ef-preview"></pre>
         </div>
       </div>
     </aside>
@@ -237,6 +272,7 @@
     <button type="button" role="menuitem" data-act="paste">커서에 붙이기</button>
     <button type="button" role="menuitem" data-act="printBus" hidden>print bus 실행</button>
     <button type="button" role="menuitem" data-act="expandBus" hidden>expand bus 입력</button>
+    <button type="button" role="menuitem" data-act="editBus" hidden>객체 편집</button>
   </div>
   <div id="row-menu" role="menu" hidden>
     <button type="button" role="menuitem" data-act="print">print 실행</button>
