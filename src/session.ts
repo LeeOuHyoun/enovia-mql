@@ -293,9 +293,6 @@ export class MqlSession {
         this.events.prompted();
         this.open();
       }
-      // 명령을 첫 프롬프트보다 먼저 보냈다면 이 프롬프트는 시작 프롬프트일 수도, 응답 끝일 수도 있다.
-      // 다음 프롬프트를 기다리되, 더 이상 출력이 없으면 quiet 타이머가 마무리한다.
-      if (this.hold && !this.holdEarly) this.release();
       return;
     }
     if (!this.hold) {

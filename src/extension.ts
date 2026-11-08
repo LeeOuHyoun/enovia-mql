@@ -14,7 +14,7 @@ type Block = {
   result: string;
 };
 
-type SideLane = 'help' | 'list';
+type SideLane = 'help' | 'list' | 'meta';
 
 type RecallItem = {
   text: string;
@@ -31,7 +31,7 @@ type SavedPrefs = {
   drawerWidth: number;
   composerHidden: boolean;
   historyHidden: boolean;
-  drawerLane: '' | SideLane;
+  drawerLane: '' | 'help' | 'list' | 'create';
   helpTopic: string;
   listKind: string;
 };
@@ -154,6 +154,7 @@ class MqlView implements vscode.Disposable {
   private recovering = false;
   private lastContextCommand = '';
   private verbOn = false;
+  private txActive = false;
   private bootQueue: string[] = [];
   private commandQueue: string[] = [];
   private pendingSide: { lane: SideLane; text: string; token: number } | undefined;
@@ -263,6 +264,7 @@ class MqlView implements vscode.Disposable {
     this.cancelPendingSide();
     this.lastContextCommand = '';
     this.verbOn = false;
+    this.txActive = false;
     this.finishSide(false);
     this.inputEnabled = false;
     this.holding = false;
@@ -281,10 +283,10 @@ class MqlView implements vscode.Disposable {
       return;
     }
     if (message.type === 'send' && typeof message.text === 'string') {
-      this.onSend(message.text);
+      void this.confirmSend(message.text);
       return;
     }
-    if (message.type === 'side' && (message.lane === 'help' || message.lane === 'list') && typeof message.text === 'string') {
+    if (message.type === 'side' && (message.lane === 'help' || message.lane === 'list' || message.lane === 'meta') && typeof message.text === 'string') {
       const token = typeof message.token === 'number' ? message.token : 0;
       this.onSide(message.lane, message.text, token);
       return;
@@ -321,6 +323,28 @@ class MqlView implements vscode.Disposable {
     });
     const picked = uris?.[0]?.fsPath;
     if (picked) this.post({ type: 'jpoPicked', path: picked });
+  }
+
+  private async confirmSend(text: string) {
+    if (!isDestructive(text)) {
+      this.onSend(text);
+      return;
+    }
+    const run = '실행';
+    const withTx = '트랜잭션 시작 후 실행';
+    const picked = await vscode.window.showWarningMessage(
+      `삭제 명령을 실행할까요?\n\n${withSemicolon(text)}`,
+      {
+        modal: true,
+        detail: this.txActive
+          ? '현재 트랜잭션 안에서 실행됩니다.'
+          : '트랜잭션 밖에서 실행하면 되돌릴 수 없습니다. 운영 환경에서는 del 대신 mod 사용을 권장합니다.',
+      },
+      ...(this.txActive ? [run] : [withTx, run]),
+    );
+    if (!picked || this.disposed) return;
+    if (picked === withTx) this.onSend('start transaction;');
+    this.onSend(text);
   }
 
   private onSend(text: string) {
@@ -467,12 +491,23 @@ class MqlView implements vscode.Disposable {
       this.sendBootNext();
       return;
     }
-    this.noteActiveCommand();
+    const failed = this.noteActiveCommand();
     const side = this.sideLane != null;
     this.holding = false;
     this.finishSide(side);
     this.postClear();
+    if (failed) {
+      this.restoreContext();
+      return;
+    }
     this.flushPending();
+  }
+
+  private restoreContext() {
+    this.booting = true;
+    this.recovering = true;
+    this.bootQueue = [this.lastContextCommand || contextCommand];
+    this.sendBootNext();
   }
 
   private finishSide(restoreInput: boolean) {
@@ -556,6 +591,7 @@ class MqlView implements vscode.Disposable {
     this.booting = true;
     this.recovering = true;
     this.bootQueue = [];
+    this.txActive = false;
     this.inputEnabled = false;
     this.post({ type: 'input', enabled: false });
     this.postClear();
@@ -608,9 +644,12 @@ class MqlView implements vscode.Disposable {
   }
 
   private noteActiveCommand() {
-    if (this.activeId == null) return;
+    if (this.activeId == null) return false;
     const block = this.blocks.find((item) => item.id === this.activeId);
-    if (block && !hasMqlError(block.result)) this.trackSessionSetting(block.command);
+    if (!block) return false;
+    if (hasMqlError(block.result)) return true;
+    this.trackSessionSetting(block.command);
+    return false;
   }
 
   private flushPending() {
@@ -637,7 +676,13 @@ class MqlView implements vscode.Disposable {
     }
     if (/^verb(?:ose)? off\s*;$/i.test(norm)) {
       this.verbOn = false;
+      return;
     }
+    if (/^start transaction(?: (?:read|write))?\s*;$/i.test(norm)) {
+      this.txActive = true;
+      return;
+    }
+    if (/^(?:commit|abort) transaction\s*;$/i.test(norm)) this.txActive = false;
   }
 
   private consumeClose() {
@@ -744,7 +789,7 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
   const drawerWidth = typeof value.drawerWidth === 'number' && Number.isFinite(value.drawerWidth)
     ? Math.max(180, Math.round(value.drawerWidth))
     : base.drawerWidth;
-  const drawerLane = value.drawerLane === 'help' || value.drawerLane === 'list' || value.drawerLane === ''
+  const drawerLane = value.drawerLane === 'help' || value.drawerLane === 'list' || value.drawerLane === 'create' || value.drawerLane === ''
     ? value.drawerLane
     : base.drawerLane;
   const helpTopic = typeof value.helpTopic === 'string' && /^[a-z]*$/.test(value.helpTopic)
@@ -784,10 +829,15 @@ function isSessionEnd(command: string) {
   return /^(quit|exit)\s*;$/i.test(command);
 }
 
+function isDestructive(text: string) {
+  return /^\s*del(?:ete)?\s/i.test(text);
+}
+
 function sideCommand(lane: SideLane, text: string) {
   const command = withSemicolon(text);
   if (lane === 'help' && /^help(?: [a-z]+)?;$/.test(command)) return command;
   if (lane === 'list' && /^list [a-z]+;$/.test(command)) return command;
+  if (lane === 'meta' && /^(?:list (?:type|vault)|print (?:type|policy|attribute) '[^';]*' select [a-z ]+);$/.test(command)) return command;
   return '';
 }
 

@@ -56,6 +56,25 @@ const drawerRefresh = document.getElementById('drawer-refresh');
 const drawerClose = document.getElementById('drawer-close');
 const drawerWide = document.getElementById('drawer-wide');
 const rowMenu = document.getElementById('row-menu');
+const railCreate = document.getElementById('rail-create');
+const createView = document.getElementById('create-view');
+const cfType = document.getElementById('cf-type');
+const cfPolicy = document.getElementById('cf-policy');
+const cfVault = document.getElementById('cf-vault');
+const cfAttrs = document.getElementById('cf-attrs');
+const cfNote = document.getElementById('cf-note');
+const cfPreview = document.getElementById('cf-preview');
+const cfInsert = document.getElementById('cf-insert');
+const cfRun = document.getElementById('cf-run');
+const cfTypes = document.getElementById('cf-types');
+const cfPolicies = document.getElementById('cf-policies');
+const cfVaults = document.getElementById('cf-vaults');
+const cfStates = document.getElementById('cf-states');
+const cfModeOne = document.getElementById('cf-mode-one');
+const cfModeGrid = document.getElementById('cf-mode-grid');
+const cfRows = document.getElementById('cf-rows');
+const cfRowsBody = cfRows.tBodies[0];
+const cfAddRow = document.getElementById('cf-add-row');
 const collapsed = new Set();
 const blockText = new Map();
 const FIND_WORD_SEPARATORS = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
@@ -105,6 +124,17 @@ const phrases = [
   'list portal',
   'list page',
   'add bus',
+  'add attribute',
+  'add type',
+  'add policy',
+  'add relationship',
+  'add command',
+  'add menu',
+  'add form',
+  'add table',
+  'add channel',
+  'add portal',
+  'add connection',
   'modify bus',
   'delete bus',
   'expand bus * * *',
@@ -127,6 +157,44 @@ const phrases = [
   'quit;',
   'exit;',
 ];
+const DDL_TEMPLATES = new Map([
+  ['add attribute', "add attribute '<attribute_name>' type <string|integer|real|date|boolean> description '<description>' default '<default_value>' notmultiline nothidden;"],
+  ['add type', "add type '<type_name>' description '<description>' abstract <true|false> derived '<parent_type_name>' attribute '<attribute_name>';"],
+  ['add policy', "add policy '<policy_name>' description '<description>' type '<type_name>' sequence '<sequence>' store '<store_name>' format generic state '<state_name>' revision <true|false> version <true|false> promote <true|false> public <access>;"],
+  ['add relationship', "add relationship '<relationship_name>' description '<description>' nothidden from type '<from_type>' cardinality <one|many> revision <none|float|replicate> clone <none|float|replicate> to type '<to_type>' cardinality <one|many> revision <none|float|replicate> clone <none|float|replicate>;"],
+  ['add command', "add command '<command_name>' description '<description>' label '<label_key>' href '<url_path>' setting 'Registered Suite' '<suite_name>' setting 'Target Location' '<content|popup|slidein>';"],
+  ['add menu', "add menu '<menu_name>' description '<description>' label '<label_key>' setting 'Registered Suite' '<suite_name>' command '<command_name>';"],
+  ['add form', "add form '<form_name>' web field name '<field_name>' label '<label_key>' businessobject '<expression>' setting 'Registered Suite' '<suite_name>' setting 'Field Type' '<basic|attribute>' setting 'Editable' '<true|false>';"],
+  ['add table', "add table '<table_name>' system column name '<column_name>' label '<label_key>' businessobject '<expression>' sorttype '<none|alphanumeric|other>' setting 'Registered Suite' '<suite_name>';"],
+  ['add channel', "add channel '<channel_name>' description '<description>' height '<height>' setting 'Registered Suite' '<suite_name>' command '<command_name>';"],
+  ['add portal', "add portal '<portal_name>' description '<description>' setting 'Registered Suite' '<suite_name>' channel '<channel_name>';"],
+  ['add bus', "add bus '<type>' '<name>' '<revision>' policy '<policy>' vault '<vault>';"],
+  ['add connection', "add connection '<relationship>' from <from_id> to <to_id>;"],
+  ['connect bus', "connect bus <from_id> relationship '<relationship>' to <to_id>;"],
+]);
+const PLACEHOLDER = /<[A-Za-z_][\w|,.]*>/g;
+const SYMBOLIC_ADMINS = new Set([
+  'attribute',
+  'type',
+  'policy',
+  'relationship',
+  'interface',
+  'format',
+  'store',
+  'vault',
+  'role',
+  'group',
+  'association',
+  'program',
+  'command',
+  'menu',
+  'form',
+  'table',
+  'channel',
+  'portal',
+  'page',
+  'inquiry',
+]);
 const schemaCache = new Map();
 let txActive = false;
 let assistIndex = 0;
@@ -170,9 +238,57 @@ function syncCommandClear() {
   syncGutter();
 }
 
+const commandUndo = [];
+const commandRedo = [];
+let commandEditKind = '';
+let commandEditAt = 0;
+
+function commandState() {
+  return { value: command.value, start: command.selectionStart ?? 0, end: command.selectionEnd ?? 0 };
+}
+
+function recordCommand(kind = '') {
+  const now = Date.now();
+  const merge = kind !== '' && kind === commandEditKind && now - commandEditAt < 1000;
+  commandEditKind = kind;
+  commandEditAt = now;
+  commandRedo.length = 0;
+  if (merge) return;
+  const top = commandUndo[commandUndo.length - 1];
+  if (top && top.value === command.value) return;
+  commandUndo.push(commandState());
+  if (commandUndo.length > 200) commandUndo.shift();
+}
+
+function resetCommandHistory() {
+  commandUndo.length = 0;
+  commandRedo.length = 0;
+  commandEditKind = '';
+}
+
+function stepCommandHistory(redo) {
+  const state = (redo ? commandRedo : commandUndo).pop();
+  if (!state || command.disabled) return;
+  (redo ? commandUndo : commandRedo).push(commandState());
+  commandEditKind = '';
+  closeAssist();
+  command.value = state.value;
+  command.setSelectionRange(state.start, state.end);
+  syncCommandClear();
+  savePrefs();
+}
+
+function editKind(event) {
+  const type = event.inputType;
+  if (type === 'insertText' || type === 'insertCompositionText') return /\s/.test(event.data ?? '') ? '' : 'insert';
+  if (type === 'deleteContentBackward' || type === 'deleteContentForward') return type;
+  return '';
+}
+
 function clearCommand() {
   if (command.disabled || command.value === '') return;
   closeAssist();
+  recordCommand();
   command.value = '';
   syncCommandClear();
   command.focus();
@@ -210,7 +326,7 @@ function syncStatus() {
   const hasNotices = history.querySelector('.notice') !== null;
   const blockRunning = history.querySelector('.block.pending') !== null;
   const busy = sideBusy || blockRunning;
-  for (const button of history.querySelectorAll('.block-rerun')) {
+  for (const button of history.querySelectorAll('.block-rerun, .block-hint button')) {
     button.disabled = command.disabled || busy;
   }
   syncTx();
@@ -247,11 +363,14 @@ function setInputEnabled(enabled) {
   syncDrawerControls();
   syncStatus();
   if (!enabled) closeAssist();
-  if (enabled && !wasEnabled) {
+  if (enabled && !wasEnabled && document.hasFocus()) {
     const active = document.activeElement;
-    if (active !== helpTopic && active !== helpFind && active !== listFilter && active !== listKind) command.focus();
+    if (!drawer.contains(active)) command.focus();
   }
-  if (enabled) flushQueuedSide();
+  syncCreate();
+  if (!enabled) return;
+  flushQueuedSide();
+  pumpMeta();
 }
 
 function setClearEnabled(enabled) {
@@ -672,6 +791,41 @@ function blockNode(block) {
   return item;
 }
 
+function sameCommand(a, b) {
+  const norm = (text) => text.trim().replace(/\s+/g, ' ').toLowerCase();
+  return norm(a) === norm(b);
+}
+
+function symbolicCommand(cmd) {
+  const m = cmd.trim().match(/^add\s+([a-z]+)\s+(?:'([^']+)'|"([^"]+)"|([^\s;'"]+))/i);
+  if (!m) return '';
+  const admin = m[1].toLowerCase();
+  if (!SYMBOLIC_ADMINS.has(admin)) return '';
+  const name = m[2] ?? m[3] ?? m[4];
+  const suffix = admin === 'table' ? ' system' : '';
+  return `add property ${admin}_${name.replace(/\s+/g, '')} on program eServiceSchemaVariableMapping.tcl to ${admin} ${formatSchemaName(name)}${suffix};`;
+}
+
+function symbolicHint(item) {
+  const stored = blockText.get(item.dataset.id);
+  if (!stored || item.querySelector('.block-hint')) return;
+  const cmd = symbolicCommand(stored.command);
+  if (!cmd || hasErrorLine(cleanResult(stored.result))) return;
+  if ([...blockText.values()].some((b) => sameCommand(b.command, cmd))) return;
+  const hint = document.createElement('div');
+  hint.className = 'block-hint';
+  hint.dataset.cmd = cmd;
+  const label = document.createElement('span');
+  label.textContent = cmd;
+  const run = document.createElement('button');
+  run.type = 'button';
+  run.textContent = '심볼릭 등록';
+  run.title = '심볼릭 이름을 eServiceSchemaVariableMapping.tcl 에 등록합니다';
+  run.disabled = command.disabled || sideBusy;
+  hint.append(label, run);
+  item.append(hint);
+}
+
 function render(state) {
   if ('runningId' in state) runningId = state.runningId == null ? null : state.runningId;
   if (!hydrated && state.prefs) hydratePrefs(state.prefs);
@@ -680,6 +834,7 @@ function render(state) {
   for (const block of state.blocks) nodes.push(blockNode(block));
   history.replaceChildren(...nodes);
   pruneBlockState();
+  for (const item of history.querySelectorAll('.block:not(.pending)')) symbolicHint(item);
   ensureRecall(state.blocks);
   markRecall();
   recomputeTx(state.blocks);
@@ -749,7 +904,7 @@ function hydratePrefs(prefs) {
     listKind.value = prefs.listKind;
     sentKind = listKind.value;
   }
-  if (prefs.drawerLane === 'help' || prefs.drawerLane === 'list') {
+  if (prefs.drawerLane === 'help' || prefs.drawerLane === 'list' || prefs.drawerLane === 'create') {
     drawerLane = prefs.drawerLane;
     setDrawerOpen(true);
   }
@@ -1360,12 +1515,14 @@ function formatCommand() {
     if (!selected.trim()) return;
     const formatted = formatMqlText(selected);
     if (!formatted) return;
+    recordCommand();
     command.value = value.slice(0, start) + formatted + value.slice(end);
     command.selectionStart = start;
     command.selectionEnd = start + formatted.length;
   } else {
     const formatted = formatMqlText(value);
     if (!formatted) return;
+    recordCommand();
     command.value = formatted;
     const caret = formatted.length;
     command.selectionStart = caret;
@@ -1458,6 +1615,7 @@ function joinLines() {
   if (!joined) return;
   closeAssist();
   if (joined.text !== value) {
+    recordCommand();
     command.focus();
     command.setSelectionRange(joined.from, joined.to);
     const inserted = document.execCommand('insertText', false, joined.insert);
@@ -1498,6 +1656,7 @@ function ensureStatementSemicolon() {
   const start = command.selectionStart ?? 0;
   const end = command.selectionEnd ?? start;
   const shift = (pos) => (pos >= index ? pos + 1 : pos);
+  recordCommand();
   command.focus();
   command.setSelectionRange(index, index);
   const inserted = document.execCommand('insertText', false, ';');
@@ -1515,9 +1674,36 @@ function statementAtCursor() {
   return statementAt(command.value, caretOffset());
 }
 
+function placeholderSpans(text) {
+  return [...text.matchAll(PLACEHOLDER)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
+function selectSpan(span) {
+  command.focus();
+  command.setSelectionRange(span.start, span.end);
+}
+
+function jumpPlaceholder(back) {
+  const spans = placeholderSpans(command.value);
+  if (spans.length === 0) return false;
+  const start = command.selectionStart ?? 0;
+  const end = command.selectionEnd ?? start;
+  const span = back
+    ? spans.findLast((s) => s.end <= start) ?? spans[spans.length - 1]
+    : spans.find((s) => s.start >= end) ?? spans[0];
+  selectSpan(span);
+  return true;
+}
+
 function runStatement() {
   closeAssist();
   if (command.disabled) return;
+  const stmt = statementSpanAt(command.value, caretOffset());
+  const hole = stmt && placeholderSpans(command.value).find((s) => s.start >= stmt.start && s.end <= stmt.end);
+  if (hole) {
+    selectSpan(hole);
+    return;
+  }
   ensureStatementSemicolon();
   const text = statementAtCursor();
   if (!text) return;
@@ -1563,6 +1749,7 @@ function lineAt(value, caret) {
 
 function insertStatement(text) {
   if (command.disabled) return;
+  recordCommand();
   const value = command.value;
   if (value.trim() === '') {
     command.value = text;
@@ -1605,6 +1792,7 @@ function appendClause(text, pick) {
   const tail = value.slice(at);
   const gap = head.length > 0 && !/\s$/.test(head) ? ' ' : '';
   const insertedAt = head.length + gap.length;
+  recordCommand();
   command.value = head + gap + text + tail;
   const mark = pick ? text.indexOf(pick) : -1;
   const start = insertedAt + (mark === -1 ? text.length : mark);
@@ -1620,6 +1808,7 @@ function insertAtCursor(text) {
   const start = command.selectionStart ?? command.value.length;
   const end = command.selectionEnd ?? start;
   const value = command.value;
+  recordCommand();
   command.value = value.slice(0, start) + text + value.slice(end);
   const caret = start + text.length;
   command.selectionStart = caret;
@@ -1632,6 +1821,7 @@ function insertAtCursor(text) {
 function insertAtCaret(text) {
   const caret = caretOffset();
   const value = command.value;
+  recordCommand();
   command.value = value.slice(0, caret) + text + value.slice(caret);
   const next = caret + text.length;
   command.selectionStart = next;
@@ -1783,6 +1973,7 @@ function syncRail() {
   const open = document.body.classList.contains('drawer-open');
   railHelp.setAttribute('aria-pressed', open && drawerLane === 'help' ? 'true' : 'false');
   railList.setAttribute('aria-pressed', open && drawerLane === 'list' ? 'true' : 'false');
+  railCreate.setAttribute('aria-pressed', open && drawerLane === 'create' ? 'true' : 'false');
   drawer.inert = !open;
   drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
 }
@@ -1865,7 +2056,7 @@ function requestSide(lane, text) {
   if (lane === 'help') sentHelpTopic = helpTopic.value;
   if (lane === 'list') sentKind = listKind.value;
   syncDrawerControls();
-  setDrawerNote('조회 중');
+  if (lane !== 'meta') setDrawerNote('조회 중');
   vscode.postMessage({ type: 'side', lane, text, token: activeToken });
   return true;
 }
@@ -1900,7 +2091,9 @@ function setDrawerOpen(open) {
   if (!open) closeRowMenu();
   syncRail();
   syncHistory();
-  if (open && !sideBusy) {
+  if (open && drawerLane === 'create') {
+    void loadCreateLists(false);
+  } else if (open && !sideBusy) {
     const fetched = drawerLane === 'help'
       ? helpFetchedTopic === helpTopic.value
       : listFetchedKind === listKind.value;
@@ -1922,6 +2115,7 @@ function toggleDrawer(lane) {
 function refreshDrawer() {
   if (drawerRefresh.disabled) return;
   if (drawerLane === 'help') requestSide('help', helpText());
+  else if (drawerLane === 'create') void loadCreateLists(true);
   else requestSide('list', `list ${listKind.value}`);
 }
 
@@ -1979,6 +2173,10 @@ function onSideStart(message) {
   sideBusy = true;
   sideStarted = true;
   syncDrawerControls();
+  if (message.lane === 'meta') {
+    metaRaw = '';
+    return;
+  }
   if (message.lane === 'help') {
     helpRaw = '';
     helpView.textContent = '';
@@ -1989,7 +2187,8 @@ function onSideStart(message) {
 
 function onSideChunk(message) {
   if (message.token !== activeToken || message.lane !== pendingLane) return;
-  if (message.lane === 'help') helpRaw += message.text;
+  if (message.lane === 'meta') metaRaw += message.text;
+  else if (message.lane === 'help') helpRaw += message.text;
   else listRaw += message.text;
 }
 
@@ -2001,7 +2200,11 @@ function onSideEnd(message) {
   sideBusy = false;
   sideStarted = false;
   if (!command.disabled) sideHold = false;
-  if (!superseded && started && lane === 'help') {
+  if (lane === 'meta') {
+    const done = metaActive;
+    metaActive = null;
+    done?.resolve(started ? metaRaw : null);
+  } else if (!superseded && started && lane === 'help') {
     paintHelp(true, false);
     helpFetchedTopic = sentHelpTopic;
     setDrawerNote(helpRaw.trim() ? '' : '결과가 없습니다.');
@@ -2017,6 +2220,316 @@ function onSideEnd(message) {
   } else if (!superseded) setDrawerNote('조회하지 못했습니다.');
   syncDrawerControls();
   flushQueuedSide();
+  pumpMeta();
+}
+
+const metaWaiters = [];
+const attrMeta = new Map();
+let metaActive = null;
+let metaRaw = '';
+let cfTypeLoaded = '';
+let cfPolicyLoaded = '';
+let cfPolicyAuto = false;
+
+function requestMeta(text) {
+  return new Promise((resolve) => {
+    metaWaiters.push({ text, resolve });
+    pumpMeta();
+  });
+}
+
+function pumpMeta() {
+  if (metaActive || sideBusy || sideHold || command.disabled || metaWaiters.length === 0) return;
+  metaActive = metaWaiters.shift();
+  if (!requestSide('meta', metaActive.text)) {
+    metaActive.resolve(null);
+    metaActive = null;
+  }
+}
+
+function dropMeta() {
+  for (const waiter of metaWaiters.splice(0)) waiter.resolve(null);
+  metaActive?.resolve(null);
+  metaActive = null;
+}
+
+function selectValues(raw, key) {
+  if (raw == null) return null;
+  const text = cleanResult(raw);
+  if (hasErrorLine(text)) return null;
+  const values = [];
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*([\w.]+)\s=\s?(.*)$/);
+    if (m && m[1] === key) values.push(m[2].trim());
+  }
+  return values;
+}
+
+function rangeValue(value) {
+  const m = value.match(/^=\s*(.*)$/);
+  if (m) return [m[1]];
+  if (/^(?:!=|<|>|~|!~|match|nmatch|smatch|nsmatch|program|between)/i.test(value)) return [];
+  return value ? [value] : [];
+}
+
+function mqlQuote(value) {
+  return value.includes("'") && !value.includes('"') ? `"${value}"` : `'${value}'`;
+}
+
+function fillDatalist(list, names) {
+  list.replaceChildren(...names.map((name) => new Option(name, name)));
+}
+
+function setCreateNote(text) {
+  cfNote.hidden = text === '';
+  cfNote.textContent = text;
+}
+
+async function loadCreateLists(force) {
+  for (const [kind, list] of [['type', cfTypes], ['vault', cfVaults]]) {
+    if (!force && list.children.length > 0) continue;
+    let names = force ? null : schemaCache.get(kind);
+    if (!names) {
+      setCreateNote(`${kind} 목록 조회 중`);
+      const raw = await requestMeta(`list ${kind}`);
+      names = raw == null ? null : cleanResult(raw).split('\n').map((line) => line.trim()).filter((line) => line && !hasErrorLine(line));
+      if (names) schemaCache.set(kind, names);
+    }
+    fillDatalist(list, names || []);
+  }
+  if (force) {
+    attrMeta.clear();
+    cfTypeLoaded = '';
+    cfPolicyLoaded = '';
+    await loadType();
+    return;
+  }
+  setCreateNote('');
+}
+
+async function loadType() {
+  const type = cfType.value.trim();
+  if (!type || type === cfTypeLoaded) return;
+  cfTypeLoaded = type;
+  setCreateNote('type 정보 조회 중');
+  const raw = await requestMeta(`print type '${type}' select policy attribute`);
+  if (cfTypeLoaded !== type) return;
+  const policies = selectValues(raw, 'policy');
+  const attrs = selectValues(raw, 'attribute');
+  if (!policies || !attrs) {
+    renderAttrs([]);
+    setCreateNote('type 정보를 조회하지 못했습니다. 값을 직접 입력하세요.');
+    syncCreate();
+    return;
+  }
+  fillDatalist(cfPolicies, policies);
+  if (policies.length > 0 && !policies.includes(cfPolicy.value.trim()) && (cfPolicyAuto || !cfPolicy.value.trim())) {
+    cfPolicy.value = policies[0];
+    cfPolicyAuto = true;
+    void loadPolicy();
+  }
+  for (let i = 0; i < attrs.length; i += 1) {
+    if (attrMeta.has(attrs[i])) continue;
+    setCreateNote(`속성 정보 조회 중 (${i + 1}/${attrs.length})`);
+    const meta = await requestMeta(`print attribute '${attrs[i]}' select type default range`);
+    if (cfTypeLoaded !== type) return;
+    attrMeta.set(attrs[i], {
+      type: selectValues(meta, 'type')?.[0] || '',
+      def: selectValues(meta, 'default')?.[0] || '',
+      ranges: (selectValues(meta, 'range') || []).flatMap(rangeValue),
+    });
+  }
+  renderAttrs(attrs);
+  setCreateNote(attrs.length === 0 ? '속성이 없습니다.' : '');
+  syncCreate();
+}
+
+async function loadPolicy() {
+  const policy = cfPolicy.value.trim();
+  if (!policy || policy === cfPolicyLoaded) return;
+  cfPolicyLoaded = policy;
+  const raw = await requestMeta(`print policy '${policy}' select state`);
+  if (cfPolicyLoaded !== policy) return;
+  fillDatalist(cfStates, selectValues(raw, 'state') || []);
+}
+
+function attrControl(name, meta) {
+  const choices = meta.ranges.length > 0 ? meta.ranges : /^boolean$/i.test(meta.type) ? ['TRUE', 'FALSE'] : null;
+  let control;
+  if (choices) {
+    control = document.createElement('select');
+    control.append(new Option(meta.def ? `(기본: ${meta.def})` : '', ''), ...choices.map((v) => new Option(v, v)));
+  } else {
+    control = document.createElement('input');
+    control.spellcheck = false;
+    control.autocomplete = 'off';
+    control.placeholder = /^date$/i.test(meta.type) ? 'MM/DD/YYYY' : meta.def;
+    if (/^(?:integer|real)$/i.test(meta.type)) control.inputMode = 'decimal';
+  }
+  control.className = 'cf-input';
+  control.dataset.attr = name;
+  return control;
+}
+
+const CF_ROW_FIELDS = [['name', 'Name'], ['rev', 'Revision'], ['current', 'State'], ['owner', 'Owner'], ['description', 'Description']];
+let cfAttrNames = [];
+
+function attrMetaOf(name) {
+  return attrMeta.get(name) || { type: '', def: '', ranges: [] };
+}
+
+function cfControls(root) {
+  return root.querySelectorAll('[data-key], [data-attr]');
+}
+
+function controlKey(control) {
+  return control.dataset.attr ? `@${control.dataset.attr}` : control.dataset.key;
+}
+
+function readControls(root) {
+  return new Map([...cfControls(root)].map((control) => [controlKey(control), control.value]));
+}
+
+function fillControls(root, values) {
+  for (const control of cfControls(root)) {
+    const value = values.get(controlKey(control));
+    if (value !== undefined) control.value = value;
+  }
+}
+
+function fieldControl(key) {
+  const control = document.createElement('input');
+  control.className = 'cf-input';
+  control.spellcheck = false;
+  control.autocomplete = 'off';
+  control.dataset.key = key;
+  if (key === 'current') {
+    control.setAttribute('list', 'cf-states');
+    control.placeholder = '(기본)';
+  }
+  return control;
+}
+
+function gridRowNode(values) {
+  const row = document.createElement('tr');
+  row.insertCell().className = 'cf-num';
+  for (const [key] of CF_ROW_FIELDS) row.insertCell().append(fieldControl(key));
+  for (const name of cfAttrNames) row.insertCell().append(attrControl(name, attrMetaOf(name)));
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'cf-del';
+  remove.title = '행 삭제';
+  remove.setAttribute('aria-label', '행 삭제');
+  remove.textContent = '×';
+  row.insertCell().append(remove);
+  if (values) fillControls(row, values);
+  return row;
+}
+
+function renderGridHead() {
+  const cells = ['#', ...CF_ROW_FIELDS.map(([, label]) => label), ...cfAttrNames, ''].map((text) => {
+    const cell = document.createElement('th');
+    cell.textContent = text;
+    cell.title = text;
+    return cell;
+  });
+  cfRows.tHead.rows[0].replaceChildren(...cells);
+}
+
+function renderAttrs(names) {
+  const active = document.activeElement;
+  const focusKey = active instanceof HTMLElement && createView.contains(active) && active.matches('[data-key], [data-attr]') ? controlKey(active) : '';
+  const focusRow = active instanceof HTMLElement ? active.closest('#cf-rows tbody tr') : null;
+  const focusIndex = focusRow ? focusRow.sectionRowIndex : -1;
+  cfAttrNames = names;
+  const kept = readControls(cfAttrs);
+  const nodes = [];
+  for (const name of names) {
+    const meta = attrMetaOf(name);
+    const control = attrControl(name, meta);
+    control.id = `cf-attr-${nodes.length}`;
+    const label = document.createElement('label');
+    label.htmlFor = control.id;
+    label.textContent = name;
+    label.title = meta.type ? `${name} (${meta.type})` : name;
+    nodes.push(label, control);
+  }
+  cfAttrs.replaceChildren(...nodes);
+  fillControls(cfAttrs, kept);
+  renderGridHead();
+  for (const row of [...cfRowsBody.rows]) row.replaceWith(gridRowNode(readControls(row)));
+  if (!focusKey || active.isConnected) return;
+  const root = focusIndex >= 0 ? cfRowsBody.rows[focusIndex] : cfAttrs;
+  const target = root && [...cfControls(root)].find((control) => controlKey(control) === focusKey);
+  target?.focus();
+}
+
+function createLines(values) {
+  const field = (value, hole) => mqlQuote(value || hole);
+  const lines = [
+    `add bus ${field(cfType.value.trim(), '<type>')} ${field(values.get('name'), '<name>')} ${mqlQuote(values.get('rev') || '')}`,
+    `policy ${field(cfPolicy.value.trim(), '<policy>')}`,
+    `vault ${field(cfVault.value.trim(), '<vault>')}`,
+  ];
+  for (const [key, raw] of values) {
+    const value = raw.trim();
+    if (!value || key === 'name' || key === 'rev') continue;
+    lines.push(key.startsWith('@') ? `${mqlQuote(key.slice(1))} ${mqlQuote(value)}` : `${key} ${mqlQuote(value)}`);
+  }
+  lines.push('select id dump;');
+  return lines;
+}
+
+function isGridMode() {
+  return createView.classList.contains('grid');
+}
+
+function createStatements() {
+  if (!isGridMode()) {
+    const single = new Map([...readControls(createView.querySelector('.cf-grid')), ...readControls(cfAttrs)]);
+    return [createLines(single)];
+  }
+  const rows = [...cfRowsBody.rows];
+  const filled = rows.filter((row) => [...cfControls(row)].some((control) => control.value.trim()));
+  return (filled.length > 0 ? filled : rows.slice(0, 1)).map((row) => createLines(readControls(row)));
+}
+
+function createText(statements) {
+  return statements.map((lines) => lines.join('\n  ')).join('\n');
+}
+
+function syncCreate() {
+  const statements = createStatements();
+  cfPreview.textContent = createText(statements);
+  cfInsert.disabled = command.disabled;
+  cfRun.disabled = command.disabled || sideBusy || statements.some((lines) => placeholderSpans(lines.join(' ')).length > 0);
+}
+
+function setCreateMode(grid) {
+  createView.classList.toggle('grid', grid);
+  cfModeOne.setAttribute('aria-pressed', grid ? 'false' : 'true');
+  cfModeGrid.setAttribute('aria-pressed', grid ? 'true' : 'false');
+  syncCreate();
+}
+
+function addGridRow() {
+  const row = gridRowNode();
+  cfRowsBody.append(row);
+  cfControls(row)[0].focus();
+  syncCreate();
+}
+
+function removeGridRow(row) {
+  if (cfRowsBody.rows.length <= 1) {
+    for (const control of cfControls(row)) control.value = '';
+    cfControls(row)[0].focus();
+    syncCreate();
+    return;
+  }
+  const next = row.nextElementSibling || row.previousElementSibling;
+  row.remove();
+  cfControls(next)[0].focus();
+  syncCreate();
 }
 
 let stageGrow = '';
@@ -2063,6 +2576,9 @@ window.addEventListener('message', (event) => {
   }
   if (message.type === 'block') {
     runningId = message.id;
+    for (const hint of history.querySelectorAll('.block-hint')) {
+      if (sameCommand(hint.dataset.cmd, message.command)) hint.remove();
+    }
     history.append(blockNode(message));
     addRecall(message.id, message.command);
     updateTxFromCommand(message.command, false);
@@ -2084,6 +2600,8 @@ window.addEventListener('message', (event) => {
     settleBlock(message.id);
     const stored = blockText.get(String(message.id));
     if (stored && hasErrorLine(cleanResult(stored.result))) recomputeAllTx();
+    const item = blockById(String(message.id));
+    if (item) symbolicHint(item);
     return;
   }
   if (message.type === 'cleared') {
@@ -2165,6 +2683,12 @@ history.addEventListener('click', (event) => {
     const block = rerunBtn.closest('.block');
     const stored = block ? blockText.get(block.dataset.id) : null;
     if (stored?.command) vscode.postMessage({ type: 'send', text: stored.command });
+    return;
+  }
+  const hintBtn = target.closest('.block-hint button');
+  if (hintBtn) {
+    if (hintBtn.disabled || command.disabled) return;
+    vscode.postMessage({ type: 'send', text: hintBtn.closest('.block-hint').dataset.cmd });
     return;
   }
   const button = target.closest('.command');
@@ -2262,6 +2786,10 @@ function applyEditHistory(event) {
   if (!commandName || !isTextField(field)) return false;
   event.preventDefault();
   event.stopPropagation();
+  if (field === command) {
+    stepCommandHistory(commandName === 'redo');
+    return true;
+  }
   setTimeout(() => {
     if (document.activeElement !== field) return;
     document.execCommand(commandName);
@@ -2270,7 +2798,7 @@ function applyEditHistory(event) {
 }
 
 function isOtherInput(node) {
-  return node === findInput || node === jpoPath || node === recallFilter || node === helpTopic || node === helpFind || node === listFilter || node === listKind;
+  return node === findInput || node === jpoPath || node === recallFilter || drawer.contains(node);
 }
 
 window.addEventListener('keydown', (event) => {
@@ -2557,6 +3085,7 @@ function renderAssist() {
     button.dataset.index = String(index);
     button.textContent = phrase;
     button.title = phrase;
+    button.classList.toggle('template', DDL_TEMPLATES.has(phrase));
     assist.append(button);
   }
   paintAssist();
@@ -2772,13 +3301,17 @@ function moveAssist(step) {
 function acceptAssist() {
   const phrase = assistMatches[assistIndex];
   if (!phrase) return;
+  const template = DDL_TEMPLATES.get(phrase);
+  const text = template ? formatMqlText(template) : phrase;
   const range = statementPrefix();
   const value = command.value;
-  command.value = value.slice(0, range.from) + phrase + value.slice(range.to);
-  const caret = range.from + phrase.length;
+  recordCommand();
+  command.value = value.slice(0, range.from) + text + value.slice(range.to);
+  const caret = template ? range.from : range.from + text.length;
   command.selectionStart = caret;
   command.selectionEnd = caret;
   closeAssist();
+  if (template) jumpPlaceholder(false);
   syncCommandClear();
   command.focus();
   savePrefs();
@@ -2812,9 +3345,22 @@ command.addEventListener('keydown', (event) => {
       return;
     }
   }
+  if (event.key === 'Tab' && !event.ctrlKey && !event.altKey && !event.metaKey && jumpPlaceholder(event.shiftKey)) {
+    event.preventDefault();
+    return;
+  }
   if (event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey)) return;
   event.preventDefault();
   runStatement();
+});
+
+command.addEventListener('beforeinput', (event) => {
+  if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
+    event.preventDefault();
+    stepCommandHistory(event.inputType === 'historyRedo');
+    return;
+  }
+  recordCommand(editKind(event));
 });
 
 command.addEventListener('input', () => {
@@ -3051,6 +3597,56 @@ railList.addEventListener('click', () => {
   toggleDrawer('list');
 });
 
+railCreate.addEventListener('click', () => {
+  toggleDrawer('create');
+});
+
+function isListed(list, value) {
+  return [...list.options].some((option) => option.value === value);
+}
+
+createView.addEventListener('input', (event) => {
+  if (event.target === cfPolicy) cfPolicyAuto = false;
+  syncCreate();
+  if (event.target === cfType && isListed(cfTypes, cfType.value.trim())) void loadType();
+  if (event.target === cfPolicy && isListed(cfPolicies, cfPolicy.value.trim())) void loadPolicy();
+});
+
+cfType.addEventListener('change', () => {
+  void loadType();
+});
+
+cfPolicy.addEventListener('change', () => {
+  void loadPolicy();
+});
+
+cfInsert.addEventListener('click', () => {
+  insertStatement(createText(createStatements()));
+});
+
+cfRun.addEventListener('click', () => {
+  if (cfRun.disabled) return;
+  for (const lines of createStatements()) vscode.postMessage({ type: 'send', text: lines.join(' ') });
+});
+
+cfModeOne.addEventListener('click', () => {
+  setCreateMode(false);
+});
+
+cfModeGrid.addEventListener('click', () => {
+  setCreateMode(true);
+});
+
+cfAddRow.addEventListener('click', () => {
+  addGridRow();
+});
+
+cfRows.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest('.cf-del')) return;
+  removeGridRow(target.closest('tr'));
+});
+
 drawerClose.addEventListener('click', () => {
   setDrawerOpen(false);
 });
@@ -3135,6 +3731,7 @@ function resetView() {
   closeRowMenu();
   closeComposerMenu();
   command.value = '';
+  resetCommandHistory();
   syncCommandClear();
   findInput.value = '';
   setFindQuery('');
@@ -3154,6 +3751,7 @@ function resetView() {
   blockText.clear();
   collapsed.clear();
   txActive = false;
+  dropMeta();
   sideBusy = false;
   sideHold = false;
   sideStarted = false;
@@ -3170,6 +3768,9 @@ restartButton.addEventListener('click', () => {
 
 syncHistory();
 syncRail();
+renderGridHead();
+cfRowsBody.append(gridRowNode());
+syncCreate();
 new ResizeObserver(() => {
   syncGutter();
 }).observe(command);
