@@ -150,5 +150,4 @@ vite.config.ts.timestamp-*
 
 # VS Code extension build
 dist/
-*.vsix
 *.map
