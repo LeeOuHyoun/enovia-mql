@@ -6,7 +6,7 @@ const batchNotice = '배치가 표준 입력을 넘기지 못해 프롬프트가
 const contextCommand = 'set context user creator;';
 const prefsKey = 'enovia-mql.prefs';
 const maxRecalls = 200;
-const bootTimeoutMs = 1500;
+const bootTimeoutMs = 5000;
 
 type Block = {
   id: number;
@@ -153,6 +153,7 @@ class MqlView implements vscode.Disposable {
   private holding = false;
   private closeAfterEnd = false;
   private booting = false;
+  private bootStarted = false;
   private recovering = false;
   private lastContextCommand = '';
   private verbOn = false;
@@ -260,6 +261,7 @@ class MqlView implements vscode.Disposable {
     if (this.session.running) return;
     this.clearTimers();
     this.booting = true;
+    this.bootStarted = false;
     this.recovering = false;
     this.bootQueue = [];
     this.commandQueue = [];
@@ -498,7 +500,7 @@ class MqlView implements vscode.Disposable {
 
   private onReadySession() {
     if (this.booting) {
-      this.scheduleBootTimeout();
+      this.startBootCommands();
       return;
     }
     this.inputEnabled = true;
@@ -563,7 +565,8 @@ class MqlView implements vscode.Disposable {
 
   private onEnded(text?: string) {
     if (this.consumeClose()) return;
-    if (this.blocks.length > 0 || this.inputEnabled || (this.recovering && this.holding)) {
+    const firstBoot = this.booting && !this.recovering;
+    if (!firstBoot && (this.blocks.length > 0 || this.inputEnabled || (this.recovering && this.holding))) {
       this.recoverSession();
       return;
     }
@@ -576,7 +579,7 @@ class MqlView implements vscode.Disposable {
     this.holding = false;
     this.blockOpen = false;
     this.activeId = undefined;
-    if (text && this.blocks.length === 0) this.notices = [text];
+    if (text && (firstBoot || this.blocks.length === 0)) this.notices = [text];
     this.postState();
   }
 
@@ -589,6 +592,10 @@ class MqlView implements vscode.Disposable {
         this.inputEnabled = true;
         this.post({ type: 'input', enabled: !this.sideLane });
         this.postClear();
+        return;
+      }
+      if (!this.bootStarted) {
+        this.startBootCommands();
         return;
       }
       this.finishBoot();
@@ -615,6 +622,7 @@ class MqlView implements vscode.Disposable {
     this.holding = false;
     this.finishSide(side);
     this.booting = true;
+    this.bootStarted = false;
     this.recovering = true;
     this.bootQueue = [];
     this.txActive = false;
@@ -737,7 +745,12 @@ class MqlView implements vscode.Disposable {
       this.notices = next;
       this.postState();
     }
-    if (!this.booting) return;
+    if (this.booting) this.startBootCommands();
+  }
+
+  private startBootCommands() {
+    if (this.bootStarted) return;
+    this.bootStarted = true;
     this.bootQueue = [];
     const ctx = this.recovering ? this.lastContextCommand : contextCommand;
     if (ctx) this.bootQueue.push(ctx);

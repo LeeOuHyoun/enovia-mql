@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(npm test)",
+      "Bash(npm test *)",
+      "Bash(where.exe *)",
+      "Bash(npx tsc --noEmit -p .)",
+      "Bash(npm run build)",
+      "Bash(npm run package)",
+      "PowerShell(npm.cmd run build)",
+      "PowerShell(npm.cmd run package)"
+    ]
+  }
+}

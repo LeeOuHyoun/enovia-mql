@@ -1,12 +1,19 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
 const promptTailPattern = /(MQL<\d*>)\s*$/;
+const promptsPattern = /MQL<\d*>/g;
+const quotedPattern = /"[^"]*"|'[^']*'/g;
+const contextPattern = /(^|;)\s*(set|push|pop)\b|\bcont/i;
+const markerCommand = "print context;";
 const openDelayMs = 200;
 const promptDelayMs = 80;
 const immediateExitMs = 2000;
 const batchWaitMs = 20000;
-const quietMs = 1500;
+const quietMs = 5000;
+const learnQuietMs = 100;
+const settleMs = 30;
 const startupLimit = 16384;
+const pipes = ["out", "err"] as const;
 
 export type MqlSessionEvents = {
   output: (text: string) => void;
@@ -20,6 +27,13 @@ export type MqlSessionEvents = {
 
 type Pipe = "out" | "err";
 
+type Learning = {
+  lines: string[];
+  sent: number;
+  candidate?: string[];
+  verifyFrom: number;
+};
+
 export class MqlSession {
   private generation = 0;
   private proc: ChildProcess | undefined;
@@ -27,14 +41,16 @@ export class MqlSession {
   private opened = false;
   private failed = false;
   private promptSeen = false;
-  private sent = false;
   private prompt: string | undefined;
   private hold = false;
-  private holdEarly = false;
+  private done = false;
+  private marker: string[] | undefined;
+  private learning: Learning | undefined;
   private parsing = false;
   private promptWait = false;
-  private releaseWait = false;
   private lines: Record<Pipe, string> = { out: "", err: "" };
+  private rest: Record<Pipe, string> = { out: "", err: "" };
+  private held: Record<Pipe, string[]> = { out: [], err: [] };
   private startup = "";
   private startedAt = 0;
   private openTimer: ReturnType<typeof setTimeout> | undefined;
@@ -42,6 +58,9 @@ export class MqlSession {
   private trailPipe: Pipe | undefined;
   private batchTimer: ReturnType<typeof setTimeout> | undefined;
   private quietTimer: ReturnType<typeof setTimeout> | undefined;
+  private learnTimer: ReturnType<typeof setTimeout> | undefined;
+  private settleTimer: ReturnType<typeof setTimeout> | undefined;
+  private flushTimers: Partial<Record<Pipe, ReturnType<typeof setTimeout>>> = {};
   private decoders: Record<Pipe, TextDecoder> = {
     out: new TextDecoder(),
     err: new TextDecoder(),
@@ -65,14 +84,16 @@ export class MqlSession {
     this.opened = false;
     this.failed = false;
     this.promptSeen = false;
-    this.sent = false;
     this.prompt = undefined;
     this.hold = false;
-    this.holdEarly = false;
+    this.done = false;
+    this.marker = undefined;
+    this.learning = undefined;
     this.parsing = false;
     this.promptWait = false;
-    this.releaseWait = false;
     this.lines = { out: "", err: "" };
+    this.rest = { out: "", err: "" };
+    this.held = { out: [], err: [] };
     this.trailPipe = undefined;
     this.startup = "";
     void consoleEncoding().then((label) => {
@@ -111,8 +132,16 @@ export class MqlSession {
 
   send(text: string): boolean {
     if (!this.canSend()) return false;
-    this.sent = true;
-    this.proc?.stdin?.write(`${text}\n`);
+    if (!this.hold) {
+      this.write(text);
+      return true;
+    }
+    const learn = !this.marker || changesContext(text);
+    if (learn) {
+      this.marker = undefined;
+      this.learning = { lines: [], sent: 2, verifyFrom: 0 };
+    }
+    this.write([text, markerCommand, ...(learn ? [markerCommand] : [])].join("\n"));
     this.scheduleQuiet();
     return true;
   }
@@ -120,8 +149,15 @@ export class MqlSession {
   arm(): boolean {
     if (!this.canSend()) return false;
     this.hold = true;
-    this.holdEarly = !this.promptSeen;
+    this.done = false;
+    this.learning = undefined;
+    this.rest = { out: "", err: "" };
+    this.held = { out: [], err: [] };
     return true;
+  }
+
+  private write(text: string) {
+    this.proc?.stdin?.write(`${text}\n`);
   }
 
   private launch(generation: number) {
@@ -142,6 +178,7 @@ export class MqlSession {
     }
     this.proc = proc;
     this.startedAt = Date.now();
+    this.scheduleOpen();
     proc.on("error", () => this.fail(generation));
     proc.on("exit", () => this.onExit(generation));
     proc.stdout?.on("data", (chunk: Uint8Array) =>
@@ -168,7 +205,7 @@ export class MqlSession {
 
   private onExit(generation: number) {
     if (generation !== this.generation) return;
-    for (const pipe of ["out", "err"] as const) {
+    for (const pipe of pipes) {
       const rest = this.decoders[pipe].decode();
       if (rest) this.consume(rest, pipe);
     }
@@ -177,7 +214,7 @@ export class MqlSession {
     this.clearTimers();
     if (this.failed) return;
     const immediate = Date.now() - this.startedAt < immediateExitMs;
-    if (!this.promptSeen && !this.sent && immediate) {
+    if (!this.promptSeen && immediate) {
       this.failed = true;
       this.events.failed();
       return;
@@ -205,9 +242,8 @@ export class MqlSession {
       this.startup += text;
       if (this.startup.length > startupLimit) this.startup = this.startup.slice(-startupLimit);
     }
-    this.events.output(text);
+    this.route(text, pipe);
     this.scheduleOpen();
-    this.scheduleQuiet();
     const nested = this.parsing;
     const generation = this.generation;
     this.parsing = true;
@@ -228,10 +264,114 @@ export class MqlSession {
       this.events.prompted();
       this.open();
     }
-    if (this.releaseWait && generation === this.generation) {
-      this.releaseWait = false;
-      this.events.released();
+  }
+
+  private route(text: string, pipe: Pipe) {
+    if (!this.hold) {
+      this.events.output(text);
+      return;
     }
+    const parts = (this.rest[pipe] + text).split(/\r?\n/);
+    this.rest[pipe] = parts.pop() ?? "";
+    const out = parts.map((line) => this.takeLine(line, pipe)).join("");
+    if (out) this.events.output(out);
+    if (this.learning) this.scheduleLearn();
+    else this.scheduleFlush(pipe);
+    this.scheduleQuiet();
+  }
+
+  private takeLine(line: string, pipe: Pipe) {
+    if (this.learning) {
+      this.learning.lines.push(cleanLine(line));
+      return "";
+    }
+    const marker = this.marker;
+    if (!marker || this.done) return `${line}\n`;
+    const value = cleanLine(line).trim();
+    let out = "";
+    if (value && value !== marker[valuesOf(this.held[pipe]).length]) {
+      out = joinLines(this.held[pipe]);
+      this.held[pipe] = [];
+      if (value !== marker[0]) return `${out}${line}\n`;
+    }
+    if (!value && !this.held[pipe].length) return `${line}\n`;
+    this.held[pipe].push(line);
+    if (valuesOf(this.held[pipe]).length < marker.length) return out;
+    this.held[pipe] = [];
+    this.done = true;
+    clearTimeout(this.settleTimer);
+    this.settleTimer = setTimeout(() => this.release(), settleMs);
+    return out;
+  }
+
+  private scheduleFlush(pipe: Pipe) {
+    clearTimeout(this.flushTimers[pipe]);
+    const rest = this.rest[pipe];
+    const value = cleanLine(rest).trim();
+    if (!value || this.done || value !== this.marker?.[valuesOf(this.held[pipe]).length]) return;
+    this.flushTimers[pipe] = setTimeout(() => {
+      if (this.rest[pipe] !== rest) return;
+      this.rest[pipe] = "";
+      const out = this.takeLine(rest, pipe);
+      if (out) this.events.output(out);
+    }, settleMs);
+  }
+
+  private scheduleLearn() {
+    clearTimeout(this.learnTimer);
+    this.learnTimer = setTimeout(() => this.checkLearning(), learnQuietMs);
+  }
+
+  private checkLearning() {
+    const learning = this.learning;
+    if (!learning) return;
+    const tentative = pipes.map((pipe) => cleanLine(this.rest[pipe])).filter((line) => line.trim());
+    const values = valuesOf([...learning.lines, ...tentative]);
+    const candidate = doubledTail(values);
+    if (!candidate || countBlocks(values, candidate) < learning.sent) return;
+    if (!learning.candidate || !sameBlock(learning.candidate, candidate)) {
+      learning.candidate = candidate;
+      learning.verifyFrom = values.length;
+      learning.sent += 1;
+      this.write(markerCommand);
+      return;
+    }
+    if (!countBlocks(values.slice(learning.verifyFrom), candidate)) return;
+    for (const pipe of pipes) {
+      if (cleanLine(this.rest[pipe]).trim()) this.rest[pipe] = "";
+    }
+    learning.lines = stripBlocks([...learning.lines, ...tentative], candidate, learning.sent);
+    this.marker = candidate;
+    this.release();
+  }
+
+  private scheduleQuiet() {
+    clearTimeout(this.quietTimer);
+    this.quietTimer = undefined;
+    if (!this.learning) return;
+    this.quietTimer = setTimeout(() => this.release(), quietMs);
+  }
+
+  private release() {
+    if (!this.hold) return;
+    const learned = this.learning ? joinLines(this.learning.lines) : "";
+    const leftover = pipes
+      .map((pipe) => joinLines(this.held[pipe]) + (cleanLine(this.rest[pipe]).trim() ? this.rest[pipe] : ""))
+      .join("");
+    this.clearHoldTimers();
+    this.hold = false;
+    this.done = false;
+    this.learning = undefined;
+    this.rest = { out: "", err: "" };
+    this.held = { out: [], err: [] };
+    if (learned + leftover) this.events.output(learned + leftover);
+    if (!this.promptSeen) {
+      this.promptSeen = true;
+      if (this.batchTimer) clearTimeout(this.batchTimer);
+      this.batchTimer = undefined;
+      this.events.prompted();
+    }
+    this.events.released();
   }
 
   private scheduleOpen() {
@@ -279,54 +419,34 @@ export class MqlSession {
 
   private accept(candidate: string, pipe: Pipe) {
     if (matchPrompt(this.lines[pipe]) === candidate) this.lines[pipe] = "";
-    if (!this.promptSeen) {
-      this.prompt = candidate;
-      this.promptSeen = true;
-      if (this.batchTimer) clearTimeout(this.batchTimer);
-      this.batchTimer = undefined;
-      if (this.parsing) this.promptWait = true;
-      else {
-        this.events.prompted();
-        this.open();
-      }
-      return;
-    }
-    if (!this.hold) {
-      this.prompt = candidate;
-      return;
-    }
     this.prompt = candidate;
-    this.release();
+    if (this.promptSeen) return;
+    this.promptSeen = true;
+    if (this.batchTimer) clearTimeout(this.batchTimer);
+    this.batchTimer = undefined;
+    if (this.parsing) this.promptWait = true;
+    else {
+      this.events.prompted();
+      this.open();
+    }
   }
 
-  private release() {
-    if (!this.hold) return;
-    this.hold = false;
-    this.holdEarly = false;
-    if (this.quietTimer) clearTimeout(this.quietTimer);
+  private clearHoldTimers() {
+    clearTimeout(this.quietTimer);
+    clearTimeout(this.learnTimer);
+    clearTimeout(this.settleTimer);
+    for (const pipe of pipes) clearTimeout(this.flushTimers[pipe]);
     this.quietTimer = undefined;
-    if (this.parsing) this.releaseWait = true;
-    else this.events.released();
-  }
-
-  private scheduleQuiet() {
-    if (this.quietTimer) clearTimeout(this.quietTimer);
-    this.quietTimer = undefined;
-    if (!this.hold || (this.promptSeen && !this.holdEarly)) return;
-    const generation = this.generation;
-    this.quietTimer = setTimeout(() => {
-      this.quietTimer = undefined;
-      if (generation !== this.generation) return;
-      this.release();
-    }, quietMs);
+    this.learnTimer = undefined;
+    this.settleTimer = undefined;
+    this.flushTimers = {};
   }
 
   private clearTimers() {
     if (this.openTimer) clearTimeout(this.openTimer);
     if (this.trailTimer) clearTimeout(this.trailTimer);
     if (this.batchTimer) clearTimeout(this.batchTimer);
-    if (this.quietTimer) clearTimeout(this.quietTimer);
-    this.quietTimer = undefined;
+    this.clearHoldTimers();
     this.openTimer = undefined;
     this.trailTimer = undefined;
     this.trailPipe = undefined;
@@ -337,6 +457,63 @@ export class MqlSession {
 function matchPrompt(raw: string): string | undefined {
   const tail = raw.length > 32 ? raw.slice(-32) : raw;
   return promptTailPattern.exec(tail)?.[1];
+}
+
+function changesContext(command: string) {
+  return contextPattern.test(command.replace(quotedPattern, '""'));
+}
+
+function cleanLine(line: string) {
+  return line.replace(promptsPattern, "");
+}
+
+function joinLines(lines: string[]) {
+  return lines.map((line) => `${line}\n`).join("");
+}
+
+function valuesOf(lines: string[]) {
+  return lines.map((line) => cleanLine(line).trim()).filter(Boolean);
+}
+
+function sameBlock(a: string[], b: string[]) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function doubledTail(values: string[]) {
+  for (let size = 1; size <= Math.min(10, Math.floor(values.length / 2)); size++) {
+    const tail = values.slice(-size);
+    if (sameBlock(values.slice(-size * 2, -size), tail)) return tail;
+  }
+  return undefined;
+}
+
+function countBlocks(values: string[], block: string[]) {
+  let count = 0;
+  for (let index = 0; index + block.length <= values.length; ) {
+    if (sameBlock(values.slice(index, index + block.length), block)) {
+      count++;
+      index += block.length;
+    } else index++;
+  }
+  return count;
+}
+
+function stripBlocks(lines: string[], block: string[], count: number) {
+  let end = lines.length;
+  for (let removed = 0; removed < count; removed++) {
+    let index = end;
+    let matched = block.length;
+    while (index > 0 && matched > 0) {
+      index--;
+      const value = lines[index].trim();
+      if (!value) continue;
+      if (value !== block[matched - 1]) return lines.slice(0, end);
+      matched--;
+    }
+    if (matched) return lines.slice(0, end);
+    end = index;
+  }
+  return lines.slice(0, end);
 }
 
 let encodingLookup: Promise<string> | undefined;

@@ -337,10 +337,14 @@ function recomputeTx(blocks) {
   syncTx();
 }
 
+function isBusy() {
+  return sideBusy || history.querySelector('.block.pending') !== null;
+}
+
 function syncStatus() {
   const hasNotices = history.querySelector('.notice') !== null;
-  const blockRunning = history.querySelector('.block.pending') !== null;
-  const busy = sideBusy || blockRunning;
+  const busy = isBusy();
+  runButton.disabled = command.disabled || busy;
   for (const button of history.querySelectorAll('.block-rerun, .block-hint button')) {
     button.disabled = command.disabled || busy;
   }
@@ -1859,7 +1863,7 @@ function jumpPlaceholder(back) {
 
 function runStatement() {
   closeAssist();
-  if (command.disabled) return;
+  if (command.disabled || isBusy()) return;
   const stmt = statementSpanAt(command.value, caretOffset());
   const hole = stmt && placeholderSpans(command.value).find((s) => s.start >= stmt.start && s.end <= stmt.end);
   if (hole) {
@@ -1894,7 +1898,7 @@ function setJpoOpen(open) {
 }
 
 function runJpo() {
-  if (command.disabled) return;
+  if (command.disabled || isBusy()) return;
   const text = jpoCommand();
   if (!text) {
     jpoPath.focus();
