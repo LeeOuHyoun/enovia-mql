@@ -23,6 +23,7 @@ export type MqlSessionEvents = {
   ended: (text?: string) => void;
   batch: () => void;
   prompted: () => void;
+  context: (lines: string[]) => void;
 };
 
 type Pipe = "out" | "err";
@@ -342,6 +343,7 @@ export class MqlSession {
     }
     learning.lines = stripBlocks([...learning.lines, ...tentative], candidate, learning.sent);
     this.marker = candidate;
+    this.events.context(candidate);
     this.release();
   }
 

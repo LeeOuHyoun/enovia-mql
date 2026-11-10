@@ -11,6 +11,7 @@
       <span class="status-dot"></span>
       <span id="status-text">연결 중</span>
     </div>
+    <span id="ctx" class="ctx" hidden></span>
     <div id="tx" class="tx" hidden>
       <span class="tx-badge">TX</span>
       <button id="tx-commit" type="button" title="commit transaction;">commit</button>
@@ -51,6 +52,7 @@
           <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 실행</span>
           <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 명령 제안</span>
           <span><kbd>Tab</kbd> 다음 입력칸</span>
+          <span><kbd>Ctrl</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> 이전 명령</span>
           <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 포매팅</span>
           <span><kbd>Ctrl</kbd>+<kbd>J</kbd> 줄 합치기</span>
           <span><kbd>Ctrl</kbd>+<kbd>F</kbd> 결과 검색</span>
@@ -171,6 +173,7 @@
           </div>
           <button id="cf-add-row" class="cf-many" type="button">+ 행 추가</button>
           <p id="cf-note" hidden></p>
+          <ul id="cf-warn" class="warn-list" hidden></ul>
           <p class="cf-section">미리보기</p>
           <pre id="cf-preview"></pre>
           <datalist id="cf-types"></datalist>
@@ -191,7 +194,11 @@
             <label for="ef-vault">Vault</label>
             <input id="ef-vault" class="cf-input" readonly />
             <label for="ef-state">State</label>
-            <input id="ef-state" class="cf-input" readonly />
+            <div class="ef-state">
+              <input id="ef-state" class="cf-input" readonly />
+              <button id="ef-demote" type="button" disabled>demote</button>
+              <button id="ef-promote" type="button" disabled>promote</button>
+            </div>
             <label for="ef-owner">Owner</label>
             <input id="ef-owner" class="cf-input" data-key="owner" spellcheck="false" autocomplete="off" />
             <label for="ef-desc">Description</label>
@@ -200,8 +207,14 @@
           <p class="cf-section">속성</p>
           <div id="ef-attrs" class="cf-grid"></div>
           <p id="ef-note" hidden></p>
+          <ul id="ef-warn" class="warn-list" hidden></ul>
           <p class="cf-section">미리보기</p>
           <pre id="ef-preview"></pre>
+          <p id="ef-undo-head" class="cf-section ef-undo-head" hidden>
+            <span>되돌리는 문장</span>
+            <button id="ef-undo-copy" type="button">복사</button>
+          </p>
+          <pre id="ef-undo" hidden></pre>
         </div>
       </div>
     </aside>
@@ -273,6 +286,7 @@
     <button type="button" role="menuitem" data-act="printBus" hidden>print bus 실행</button>
     <button type="button" role="menuitem" data-act="expandBus" hidden>expand bus 입력</button>
     <button type="button" role="menuitem" data-act="editBus" hidden>객체 편집</button>
+    <button type="button" role="menuitem" data-act="graphBus" hidden>3D MQL 그래프에서 열기</button>
   </div>
   <div id="row-menu" role="menu" hidden>
     <button type="button" role="menuitem" data-act="print">print 실행</button>

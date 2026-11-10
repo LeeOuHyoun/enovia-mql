@@ -5,3 +5,4 @@ tsconfig.json
 esbuild.js
 .gitignore
 **/*.map
+docs/**

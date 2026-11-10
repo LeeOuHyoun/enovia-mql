@@ -89,6 +89,21 @@ textarea {
   );
 }
 
+.ctx {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.ctx[hidden] {
+  display: none;
+}
+
 .tx {
   display: inline-flex;
   align-items: center;
@@ -717,6 +732,33 @@ body[data-drawer="edit"] #edit-view {
   background: transparent;
 }
 
+textarea.cf-input {
+  height: auto;
+  min-height: 22px;
+  padding: 2px 6px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.cf-input.changed {
+  border-color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow, #cca700));
+}
+
+.cf-grid label.changed {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow, #cca700));
+}
+
+.ef-state {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ef-state .cf-input {
+  flex: 1 1 auto;
+}
+
 .cf-section {
   margin: 6px 0 0;
   padding-bottom: 2px;
@@ -740,8 +782,32 @@ body[data-drawer="edit"] #edit-view {
   display: none;
 }
 
+.warn-list {
+  margin: 0;
+  padding: 4px 8px 4px 22px;
+  border-radius: 2px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow, #cca700));
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 10%, transparent);
+}
+
+.warn-list[hidden] {
+  display: none;
+}
+
+.ef-undo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ef-undo-head[hidden] {
+  display: none;
+}
+
 #cf-preview,
-#ef-preview {
+#ef-preview,
+#ef-undo {
   margin: 0;
   padding: 6px 8px;
   border-radius: 2px;
@@ -802,6 +868,9 @@ body[data-drawer="create"] #cf-insert {
 #ef-delete,
 #ef-insert,
 #ef-run,
+#ef-promote,
+#ef-demote,
+#ef-undo-copy,
 #cf-add-row {
   height: 22px;
   margin: 0;
@@ -837,6 +906,9 @@ body[data-drawer="create"] #cf-insert {
 #cf-insert:hover:not(:disabled),
 #ef-delete:hover:not(:disabled),
 #ef-insert:hover:not(:disabled),
+#ef-promote:hover:not(:disabled),
+#ef-demote:hover:not(:disabled),
+#ef-undo-copy:hover,
 #cf-add-row:hover {
   background: var(--vscode-toolbar-hoverBackground);
 }
@@ -850,7 +922,9 @@ body[data-drawer="create"] #cf-insert {
 #cf-run:disabled,
 #ef-delete:disabled,
 #ef-insert:disabled,
-#ef-run:disabled {
+#ef-run:disabled,
+#ef-promote:disabled,
+#ef-demote:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -908,6 +982,24 @@ body[data-drawer="create"] #cf-insert {
 
 #cf-rows .cf-num::before {
   content: counter(cf-row);
+}
+
+#cf-rows tr[data-status] .cf-num::after {
+  margin-left: 2px;
+}
+
+#cf-rows tr[data-status="run"] .cf-num::after {
+  content: "…";
+}
+
+#cf-rows tr[data-status="done"] .cf-num::after {
+  content: "✓";
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #73c991));
+}
+
+#cf-rows tr[data-status="fail"] .cf-num::after {
+  content: "✗";
+  color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #f14c4c));
 }
 
 .cf-del {
@@ -1056,6 +1148,12 @@ body.history-hidden #drawer-wide .icon-shrink {
 
 .list-row[hidden] {
   display: none;
+}
+
+.list-sym {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 #split {
@@ -1495,6 +1593,17 @@ body.composer-hidden #composer {
   text-decoration: underline;
 }
 
+.block-time {
+  flex: 0 0 auto;
+  font-family: var(--vscode-editor-font-family), ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.block-time:empty {
+  display: none;
+}
+
 .block-actions {
   flex: 0 0 auto;
   display: inline-flex;
@@ -1517,6 +1626,7 @@ body.composer-hidden #composer {
 }
 
 .block-grid,
+.block-open,
 .block-copy,
 .block-rerun,
 .block-stop {
@@ -1534,6 +1644,7 @@ body.composer-hidden #composer {
 }
 
 .block-grid:hover,
+.block-open:hover,
 .block-copy:hover,
 .block-rerun:hover:not(:disabled),
 .block-stop:hover {
@@ -1644,6 +1755,21 @@ body.composer-hidden #composer {
 
 .block.collapsed .block-hint {
   display: none;
+}
+
+.block-undo {
+  border-left-color: var(--vscode-charts-yellow, #cca700);
+  background: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 10%, transparent);
+}
+
+.oid {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.oid:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
 }
 
 .result {

@@ -3,16 +3,28 @@ import { MqlSession } from './session';
 
 const failNotice = 'mql을 시작하지 못했습니다';
 const batchNotice = '배치가 표준 입력을 넘기지 못해 프롬프트가 오지 않았습니다';
-const contextCommand = 'set context user creator;';
 const prefsKey = 'enovia-mql.prefs';
+const configKey = 'enovia-mql.contextCommand';
+const graphExtension = 'local.3d-mql';
+const graphCommand = '3d-mql.openGraph';
 const maxRecalls = 200;
 const bootTimeoutMs = 5000;
+const logLimit = 2000;
+const secretPattern = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
+const metaPattern = /^(?:list (?:type|vault)|print (?:type|policy|attribute) (?:'[^';]*'|"[^";]*") select [a-z ]+|print bus \d+(?:\.\d+){3} select [a-z. ]+|temp query bus (?:(?:'[^';]*'|"[^";]*") ){3}select id dump '\|~\|'|list property on program eServiceSchemaVariableMapping\.tcl);$/;
 
 type Block = {
   id: number;
   command: string;
   result: string;
   reset?: boolean;
+  elapsed?: number;
+  secret?: boolean;
+};
+
+type Queued = {
+  text: string;
+  batch?: number;
 };
 
 type SideLane = 'help' | 'list' | 'meta';
@@ -26,7 +38,7 @@ type SavedPrefs = {
   recalls: RecallItem[];
   jpoOpen: boolean;
   jpoPath: string;
-  commandText: string;
+  drafts: Record<string, string>;
   splitRatio: number;
   recallWidth: number;
   drawerWidth: number;
@@ -37,6 +49,16 @@ type SavedPrefs = {
   listKind: string;
 };
 
+type ViewPrefs = Omit<SavedPrefs, 'drafts'> & { commandText: string };
+
+type ViewHost = {
+  prefs: () => ViewPrefs;
+  save: (raw: unknown) => void;
+  hydrate: () => void;
+  closed: () => void;
+  log: (text: string) => void;
+};
+
 type Outbound =
   | {
       type: 'state';
@@ -44,16 +66,24 @@ type Outbound =
       clearEnabled: boolean;
       blocks: Block[];
       notices: string[];
-      prefs: SavedPrefs;
+      prefs: ViewPrefs;
       runningId?: number;
+      context: string;
+      graph: boolean;
+      contextCommand: string;
     }
-  | { type: 'block'; id: number; command: string }
-  | { type: 'blockDone'; id: number }
+  | { type: 'block'; id: number; command: string; secret?: boolean; batch?: number }
+  | { type: 'blockDone'; id: number; elapsed: number }
+  | { type: 'batchEnd'; batch: number }
   | { type: 'reset'; id: number }
   | { type: 'chunk'; id: number; text: string }
   | { type: 'cleared' }
+  | { type: 'resetView' }
   | { type: 'input'; enabled: boolean }
   | { type: 'clearEnabled'; enabled: boolean }
+  | { type: 'context'; text: string }
+  | { type: 'graph'; available: boolean }
+  | { type: 'config'; contextCommand: string }
   | { type: 'suggest' }
   | { type: 'format' }
   | { type: 'joinLines' }
@@ -63,7 +93,8 @@ type Outbound =
   | { type: 'jpoPicked'; path: string };
 
 export function activate(context: vscode.ExtensionContext) {
-  const host = new MqlHost(context.extensionUri, context.globalState);
+  const output = vscode.window.createOutputChannel('ENOVIA MQL');
+  const host = new MqlHost(context.extensionUri, context.globalState, output);
   const status = vscode.window.createStatusBarItem('enovia-mql.open', vscode.StatusBarAlignment.Left, 100);
   status.name = 'ENOVIA MQL';
   status.text = '$(terminal)';
@@ -84,6 +115,7 @@ export function activate(context: vscode.ExtensionContext) {
       host.joinLines();
     }),
     status,
+    output,
     host,
   );
 }
@@ -93,16 +125,31 @@ export function deactivate() {}
 class MqlHost implements vscode.Disposable {
   private readonly views: MqlView[] = [];
   private readonly slots = new Set<number>();
+  private readonly known = new Map<number, Set<string>>();
+  private readonly listeners: vscode.Disposable;
   private prefs: SavedPrefs;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly state: vscode.Memento,
+    private readonly output: vscode.OutputChannel,
   ) {
-    this.prefs = parsePrefs(this.state.get(prefsKey));
+    const raw = this.state.get(prefsKey);
+    this.prefs = loadPrefs(raw);
+    if (raw !== undefined) void this.state.update(prefsKey, this.prefs);
+    this.listeners = vscode.Disposable.from(
+      vscode.extensions.onDidChange(() => {
+        for (const view of this.views) view.postGraph();
+      }),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (!event.affectsConfiguration(configKey)) return;
+        for (const view of this.views) view.postConfig();
+      }),
+    );
   }
 
   dispose() {
+    this.listeners.dispose();
     for (const view of [...this.views]) view.dispose();
   }
 
@@ -110,20 +157,22 @@ class MqlHost implements vscode.Disposable {
     let slot = 1;
     while (this.slots.has(slot)) slot += 1;
     this.slots.add(slot);
-    const view = new MqlView(
-      this.extensionUri,
-      slot,
-      () => this.prefs,
-      (raw) => {
-        this.prefs = parsePrefs(raw, this.prefs);
-        void this.state.update(prefsKey, this.prefs);
+    const view = new MqlView(this.extensionUri, slot, {
+      prefs: () => this.viewPrefs(slot),
+      save: (raw) => this.savePrefs(slot, raw),
+      hydrate: () => {
+        this.known.set(slot, new Set(this.prefs.recalls.map((item) => item.text)));
       },
-      () => {
+      closed: () => {
         this.slots.delete(slot);
+        this.known.delete(slot);
         const index = this.views.indexOf(view);
         if (index >= 0) this.views.splice(index, 1);
       },
-    );
+      log: (text) => {
+        this.output.appendLine(`[${new Date().toISOString()}] [${slot}] ${text}`);
+      },
+    });
     this.views.push(view);
     view.open();
   }
@@ -142,6 +191,27 @@ class MqlHost implements vscode.Disposable {
     const view = this.views.find((item) => item.focused()) ?? this.views[this.views.length - 1];
     view?.joinLines();
   }
+
+  private viewPrefs(slot: number): ViewPrefs {
+    const { drafts, ...rest } = this.prefs;
+    return { ...rest, commandText: drafts[slot] ?? '' };
+  }
+
+  private savePrefs(slot: number, raw: unknown) {
+    if (!isRecord(raw)) return;
+    const next = parsePrefs(raw, this.prefs);
+    const sent = new Set(next.recalls.map((item) => item.text));
+    const known = this.known.get(slot) ?? new Set<string>();
+    const kept = this.prefs.recalls.filter((item) => !sent.has(item.text) && !known.has(item.text));
+    const draft = typeof raw.commandText === 'string' && !hasSecret(raw.commandText) ? raw.commandText : '';
+    this.known.set(slot, sent);
+    this.prefs = {
+      ...next,
+      recalls: parseRecalls([...next.recalls, ...kept], []),
+      drafts: { ...this.prefs.drafts, [slot]: draft },
+    };
+    void this.state.update(prefsKey, this.prefs);
+  }
 }
 
 class MqlView implements vscode.Disposable {
@@ -159,13 +229,20 @@ class MqlView implements vscode.Disposable {
   private verbOn = false;
   private txActive = false;
   private bootQueue: string[] = [];
-  private commandQueue: string[] = [];
+  private commandQueue: Queued[] = [];
   private pendingSide: { lane: SideLane; text: string; token: number } | undefined;
   private bootTimer: ReturnType<typeof setTimeout> | undefined;
   private activeId: number | undefined;
+  private activeText = '';
+  private activeBatch: number | undefined;
+  private activeStart = 0;
   private blockOpen = false;
   private sideLane: SideLane | undefined;
   private sideToken = 0;
+  private sideText = '';
+  private sideOutput = '';
+  private sideStart = 0;
+  private contextText = '';
   private nextId = 0;
   private blocks: Block[] = [];
   private notices: string[] = [];
@@ -174,9 +251,7 @@ class MqlView implements vscode.Disposable {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly slot: number,
-    private readonly getPrefs: () => SavedPrefs,
-    private readonly savePrefs: (raw: unknown) => void,
-    private readonly onClosed: () => void,
+    private readonly host: ViewHost,
   ) {
     this.session = new MqlSession({
       output: (text) => this.onOutput(text),
@@ -186,6 +261,7 @@ class MqlView implements vscode.Disposable {
       ended: (text) => this.onEnded(text),
       batch: () => this.onBatch(),
       prompted: () => this.onPrompted(),
+      context: (lines) => this.onContext(lines),
     });
   }
 
@@ -199,7 +275,7 @@ class MqlView implements vscode.Disposable {
     this.panel = undefined;
     panel?.dispose();
     this.session.stop();
-    this.onClosed();
+    this.host.closed();
   }
 
   focused() {
@@ -216,6 +292,14 @@ class MqlView implements vscode.Disposable {
 
   joinLines() {
     this.post({ type: 'joinLines' });
+  }
+
+  postGraph() {
+    this.post({ type: 'graph', available: graphAvailable() });
+  }
+
+  postConfig() {
+    this.post({ type: 'config', contextCommand: configuredContext() });
   }
 
   open() {
@@ -264,11 +348,12 @@ class MqlView implements vscode.Disposable {
     this.bootStarted = false;
     this.recovering = false;
     this.bootQueue = [];
-    this.commandQueue = [];
+    this.clearQueue();
     this.cancelPendingSide();
     this.lastContextCommand = '';
     this.verbOn = false;
     this.txActive = false;
+    this.contextText = '';
     this.finishSide(false);
     this.inputEnabled = false;
     this.holding = false;
@@ -283,11 +368,16 @@ class MqlView implements vscode.Disposable {
     if (!isRecord(message) || typeof message.type !== 'string') return;
     if (message.type === 'ready') {
       this.domReady = true;
+      this.host.hydrate();
       this.postState();
       return;
     }
     if (message.type === 'send' && typeof message.text === 'string') {
       void this.confirmSend(message.text, message.confirm === true);
+      return;
+    }
+    if (message.type === 'batch' && Array.isArray(message.texts) && typeof message.batch === 'number') {
+      this.onBatchSend(message.texts, message.batch);
       return;
     }
     if (message.type === 'stop') {
@@ -303,8 +393,16 @@ class MqlView implements vscode.Disposable {
       void vscode.env.clipboard.writeText(message.text);
       return;
     }
+    if (message.type === 'openDocument' && typeof message.content === 'string') {
+      void this.openDocument(message.content);
+      return;
+    }
+    if (message.type === 'openGraph' && typeof message.id === 'string') {
+      void this.openGraph(message.id);
+      return;
+    }
     if (message.type === 'prefs') {
-      this.savePrefs(message.prefs);
+      this.host.save(message.prefs);
       return;
     }
     if (message.type === 'pickJpo') {
@@ -312,7 +410,7 @@ class MqlView implements vscode.Disposable {
       return;
     }
     if (message.type === 'clear') this.onClear();
-    if (message.type === 'restart') this.onRestart();
+    if (message.type === 'restart') void this.confirmRestart();
   }
 
   private async onPickJpo() {
@@ -331,6 +429,20 @@ class MqlView implements vscode.Disposable {
     });
     const picked = uris?.[0]?.fsPath;
     if (picked) this.post({ type: 'jpoPicked', path: picked });
+  }
+
+  private async openDocument(content: string) {
+    const document = await vscode.workspace.openTextDocument({ content });
+    await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+  }
+
+  private async openGraph(id: string) {
+    if (!/^\d+(?:\.\d+){3}$/.test(id)) return;
+    try {
+      await vscode.commands.executeCommand(graphCommand, id);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`3D MQL 그래프에서 열지 못했습니다. ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async confirmSend(text: string, force = false) {
@@ -357,6 +469,20 @@ class MqlView implements vscode.Disposable {
     this.onSend(text);
   }
 
+  private async confirmRestart() {
+    if (this.txActive) {
+      const reset = '초기화';
+      const picked = await vscode.window.showWarningMessage(
+        '세션을 초기화할까요?',
+        { modal: true, detail: '세션을 다시 시작하므로 진행 중인 트랜잭션은 롤백됩니다.' },
+        reset,
+      );
+      if (picked !== reset || this.disposed) return;
+    }
+    this.post({ type: 'resetView' });
+    this.onRestart();
+  }
+
   private async onStop() {
     const id = this.activeId;
     if (!this.blockOpen || this.booting || this.sideLane || id == null) return;
@@ -369,7 +495,7 @@ class MqlView implements vscode.Disposable {
       );
       if (picked !== stop || this.disposed || !this.blockOpen || this.activeId !== id) return;
     }
-    this.commandQueue = [];
+    this.clearQueue();
     this.cancelPendingSide();
     this.recoverSession();
   }
@@ -377,10 +503,23 @@ class MqlView implements vscode.Disposable {
   private onSend(text: string) {
     if (this.sideLane) return;
     if (this.holding || this.booting || this.recovering || !this.inputEnabled) {
-      if (this.holding || this.booting || this.recovering) this.commandQueue.push(text);
+      if (this.holding || this.booting || this.recovering) this.commandQueue.push({ text });
       return;
     }
     this.sendCommand(text);
+  }
+
+  private onBatchSend(texts: unknown[], batch: number) {
+    const items = texts
+      .filter((text): text is string => typeof text === 'string' && text.trim() !== '')
+      .map((text) => ({ text, batch }));
+    const waiting = this.holding || this.booting || this.recovering;
+    if (this.sideLane || items.length === 0 || (!waiting && !this.inputEnabled)) {
+      this.post({ type: 'batchEnd', batch });
+      return;
+    }
+    this.commandQueue.push(...items);
+    this.flushPending();
   }
 
   private onSide(lane: SideLane, text: string, token: number) {
@@ -408,6 +547,9 @@ class MqlView implements vscode.Disposable {
     }
     this.sideLane = lane;
     this.sideToken = token;
+    this.sideText = command;
+    this.sideOutput = '';
+    this.sideStart = Date.now();
     this.holding = true;
     this.post({ type: 'sideStart', lane, token });
     this.post({ type: 'input', enabled: false });
@@ -425,31 +567,36 @@ class MqlView implements vscode.Disposable {
     this.post({ type: 'sideEnd', lane: side.lane, token: side.token });
   }
 
-  private sendCommand(text: string) {
+  private sendCommand(text: string, batch?: number) {
     const command = withSemicolon(text);
     if (!command) return;
     if (this.holding) {
-      this.commandQueue.unshift(text);
+      this.commandQueue.unshift({ text, batch });
       return;
     }
     if (!this.session.canSend() || !this.session.arm()) {
-      if (!this.booting) this.commandQueue.unshift(text);
+      if (!this.booting) this.commandQueue.unshift({ text, batch });
       this.recoverSession();
       return;
     }
     this.closeAfterEnd = isSessionEnd(command);
-    const block: Block = { id: ++this.nextId, command, result: '' };
+    const shown = maskSecret(command);
+    const block: Block = { id: ++this.nextId, command: shown, result: '', ...(shown !== command && { secret: true }) };
     this.blocks.push(block);
     this.activeId = block.id;
+    this.activeText = command;
+    this.activeBatch = batch;
+    this.activeStart = Date.now();
     this.blockOpen = true;
     this.holding = true;
-    this.post({ type: 'block', id: block.id, command: block.command });
+    this.post({ type: 'block', id: block.id, command: block.command, secret: block.secret, batch });
     this.postClear();
     if (!this.session.send(command)) {
       this.settleHistoryBlock();
       this.holding = false;
       this.activeId = undefined;
-      if (!this.booting) this.commandQueue.unshift(text);
+      this.activeBatch = undefined;
+      if (!this.booting) this.commandQueue.unshift({ text, batch });
       this.recoverSession();
       return;
     }
@@ -460,16 +607,17 @@ class MqlView implements vscode.Disposable {
     this.clearTimers();
     this.closeAfterEnd = false;
     this.recovering = false;
-    this.commandQueue = [];
+    this.clearQueue();
     this.cancelPendingSide();
     this.finishSide(false);
     this.holding = false;
     this.blocks = [];
     this.nextId = 0;
     this.activeId = undefined;
-    this.savePrefs({
-      ...this.getPrefs(),
-      recalls: this.getPrefs().recalls.filter((item) => item.pinned),
+    const prefs = this.host.prefs();
+    this.host.save({
+      ...prefs,
+      recalls: prefs.recalls.filter((item) => item.pinned),
       jpoPath: '',
       commandText: '',
     });
@@ -488,6 +636,7 @@ class MqlView implements vscode.Disposable {
   private onOutput(text: string) {
     if (this.booting) this.scheduleBootTimeout();
     if (this.sideLane) {
+      if (this.sideOutput.length < logLimit) this.sideOutput += text;
       this.post({ type: 'sideChunk', lane: this.sideLane, token: this.sideToken, text });
       return;
     }
@@ -514,15 +663,19 @@ class MqlView implements vscode.Disposable {
       this.noteActiveCommand();
       this.holding = false;
       this.activeId = undefined;
+      this.activeBatch = undefined;
       this.postClear();
       this.sendBootNext();
       return;
     }
     const failed = this.noteActiveCommand();
+    const batch = this.activeBatch;
     const side = this.sideLane != null;
     this.holding = false;
+    this.activeBatch = undefined;
     this.finishSide(side);
     this.postClear();
+    if (batch != null && (failed || !this.commandQueue.some((item) => item.batch === batch))) this.dropBatch(batch);
     if (failed) {
       this.restoreContext();
       return;
@@ -533,7 +686,7 @@ class MqlView implements vscode.Disposable {
   private restoreContext() {
     this.booting = true;
     this.recovering = true;
-    this.bootQueue = [this.lastContextCommand || contextCommand];
+    this.bootQueue = [this.lastContextCommand || configuredContext()].filter(Boolean);
     this.sendBootNext();
   }
 
@@ -542,17 +695,20 @@ class MqlView implements vscode.Disposable {
     if (!lane) return;
     const token = this.sideToken;
     this.sideLane = undefined;
+    this.host.log(`${Date.now() - this.sideStart}ms [${lane}] > ${this.sideText.slice(0, logLimit)}\n${this.sideOutput.slice(0, logLimit)}`);
+    this.sideOutput = '';
     this.post({ type: 'sideEnd', lane, token });
     if (restoreInput) this.post({ type: 'input', enabled: this.inputEnabled });
   }
 
   private onFailed() {
     if (this.consumeClose()) return;
+    this.host.log(failNotice);
     this.clearTimers();
     this.booting = false;
     this.recovering = false;
     this.bootQueue = [];
-    this.commandQueue = [];
+    this.clearQueue();
     this.cancelPendingSide();
     this.finishSide(false);
     if (this.blocks.length === 0) this.notices = [failNotice];
@@ -564,6 +720,7 @@ class MqlView implements vscode.Disposable {
   }
 
   private onEnded(text?: string) {
+    this.host.log(text ? `세션이 끝났습니다: ${text}` : '세션이 끝났습니다');
     if (this.consumeClose()) return;
     const firstBoot = this.booting && !this.recovering;
     if (!firstBoot && (this.blocks.length > 0 || this.inputEnabled || (this.recovering && this.holding))) {
@@ -614,11 +771,15 @@ class MqlView implements vscode.Disposable {
 
   private recoverSession() {
     if (this.disposed || this.closeAfterEnd) return;
+    this.host.log('세션을 다시 연결합니다');
     this.clearTimers();
     const side = this.sideLane != null;
+    const batch = this.activeBatch;
     this.settleHistoryBlock();
     this.markReset();
     this.activeId = undefined;
+    this.activeBatch = undefined;
+    if (batch != null) this.dropBatch(batch);
     this.holding = false;
     this.finishSide(side);
     this.booting = true;
@@ -669,6 +830,7 @@ class MqlView implements vscode.Disposable {
       else this.recoverSession();
       return;
     }
+    this.host.log(`> ${maskSecret(command)} (복구)`);
     if (this.booting) this.scheduleBootTimeout();
   }
 
@@ -689,20 +851,34 @@ class MqlView implements vscode.Disposable {
     const block = this.blocks.find((item) => item.id === this.activeId);
     if (!block) return false;
     if (hasMqlError(block.result)) return true;
-    this.trackSessionSetting(block.command);
+    this.trackSessionSetting(this.activeText);
     return false;
   }
 
   private flushPending() {
     if (this.holding || this.booting || this.recovering || this.sideLane || !this.inputEnabled) return;
-    const cmd = this.commandQueue.shift();
-    if (cmd) {
-      this.sendCommand(cmd);
+    const next = this.commandQueue.shift();
+    if (next) {
+      this.sendCommand(next.text, next.batch);
       return;
     }
     const side = this.pendingSide;
     this.pendingSide = undefined;
     if (side) this.onSide(side.lane, side.text, side.token);
+  }
+
+  private dropBatch(batch: number) {
+    this.commandQueue = this.commandQueue.filter((item) => item.batch !== batch);
+    this.post({ type: 'batchEnd', batch });
+  }
+
+  private clearQueue() {
+    const batches = new Set([...this.commandQueue.map((item) => item.batch), this.activeBatch]);
+    this.commandQueue = [];
+    this.activeBatch = undefined;
+    for (const batch of batches) {
+      if (batch != null) this.post({ type: 'batchEnd', batch });
+    }
   }
 
   private trackSessionSetting(command: string) {
@@ -735,6 +911,7 @@ class MqlView implements vscode.Disposable {
 
   private onBatch() {
     if (this.notices.includes(batchNotice)) return;
+    this.host.log(batchNotice);
     this.notices.push(batchNotice);
     this.postState();
   }
@@ -748,11 +925,17 @@ class MqlView implements vscode.Disposable {
     if (this.booting) this.startBootCommands();
   }
 
+  private onContext(lines: string[]) {
+    this.contextText = lines.join(' ');
+    this.host.log(`context: ${this.contextText}`);
+    this.post({ type: 'context', text: this.contextText });
+  }
+
   private startBootCommands() {
     if (this.bootStarted) return;
     this.bootStarted = true;
     this.bootQueue = [];
-    const ctx = this.recovering ? this.lastContextCommand : contextCommand;
+    const ctx = this.recovering ? this.lastContextCommand : configuredContext();
     if (ctx) this.bootQueue.push(ctx);
     if (this.verbOn) this.bootQueue.push('verb on;');
     this.sendBootNext();
@@ -761,8 +944,12 @@ class MqlView implements vscode.Disposable {
   private settleHistoryBlock() {
     if (!this.blockOpen || this.sideLane || this.activeId == null) return;
     const id = this.activeId;
+    const block = this.blocks.find((item) => item.id === id);
+    const elapsed = Date.now() - this.activeStart;
+    if (block) block.elapsed = elapsed;
     this.blockOpen = false;
-    this.post({ type: 'blockDone', id });
+    this.post({ type: 'blockDone', id, elapsed });
+    if (block) this.host.log(`${elapsed}ms > ${block.command}\n${block.result.slice(0, logLimit)}`);
   }
 
   private clearEnabled() {
@@ -780,8 +967,11 @@ class MqlView implements vscode.Disposable {
       clearEnabled: this.clearEnabled(),
       blocks: this.blocks.map((block) => ({ ...block })),
       notices: [...this.notices],
-      prefs: this.getPrefs(),
+      prefs: this.host.prefs(),
       runningId: this.blockOpen && !this.sideLane ? this.activeId : undefined,
+      context: this.contextText,
+      graph: graphAvailable(),
+      contextCommand: configuredContext(),
     });
   }
 
@@ -796,7 +986,7 @@ function defaultPrefs(): SavedPrefs {
     recalls: [],
     jpoOpen: false,
     jpoPath: '',
-    commandText: '',
+    drafts: {},
     splitRatio: 0.6,
     recallWidth: 200,
     drawerWidth: 300,
@@ -816,12 +1006,19 @@ function parseRecalls(value: unknown, fallback: RecallItem[]): RecallItem[] {
   for (const item of value) {
     if (!isRecord(item) || typeof item.text !== 'string') continue;
     const text = item.text.trim();
-    if (!text || seen.has(text)) continue;
+    if (!text || seen.has(text) || hasSecret(text)) continue;
     seen.add(text);
     if (item.pinned === true) pinned.push({ text, pinned: true });
     else normal.push({ text });
   }
   return [...pinned, ...normal].slice(0, maxRecalls);
+}
+
+function parseDrafts(value: unknown, fallback: Record<string, string>) {
+  if (!isRecord(value)) return fallback;
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && !hasSecret(entry[1])),
+  );
 }
 
 function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
@@ -848,7 +1045,7 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
     recalls: parseRecalls(value.recalls, base.recalls),
     jpoOpen: typeof value.jpoOpen === 'boolean' ? value.jpoOpen : base.jpoOpen,
     jpoPath: typeof value.jpoPath === 'string' ? value.jpoPath : base.jpoPath,
-    commandText: typeof value.commandText === 'string' ? value.commandText : base.commandText,
+    drafts: parseDrafts(value.drafts, base.drafts),
     splitRatio,
     recallWidth,
     drawerWidth,
@@ -858,6 +1055,12 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
     helpTopic,
     listKind,
   };
+}
+
+function loadPrefs(value: unknown): SavedPrefs {
+  const prefs = parsePrefs(value);
+  if (!isRecord(value) || isRecord(value.drafts) || typeof value.commandText !== 'string' || hasSecret(value.commandText)) return prefs;
+  return { ...prefs, drafts: { 1: value.commandText } };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -881,17 +1084,36 @@ function isDelete(text: string) {
 
 function isDestructive(text: string) {
   const bare = text.replace(/'[^']*'|"[^"]*"/g, "''");
-  return isDelete(bare) || /^\s*(?:disconnect|demote)\s/i.test(bare) || /^\s*mod(?:ify)?\s[\s\S]*\bremove\b/i.test(bare);
+  return isDelete(bare) || /^\s*(?:disconnect|demote)\s/i.test(bare) || /^\s*clear\s+(?:vault|all)\b/i.test(bare) || /^\s*mod(?:ify)?\s[\s\S]*\bremove\b/i.test(bare);
 }
 
 function sideCommand(lane: SideLane, text: string) {
+  if (lane === 'meta') {
+    const commands = text.split('\n').map(withSemicolon).filter(Boolean);
+    return commands.length > 0 && commands.every((command) => metaPattern.test(command)) ? commands.join('\n') : '';
+  }
   const command = withSemicolon(text);
   if (lane === 'help' && /^help(?: [a-z]+)?;$/.test(command)) return command;
   if (lane === 'list' && /^list [a-z]+;$/.test(command)) return command;
-  if (lane === 'meta' && /^(?:list (?:type|vault)|print (?:type|policy|attribute) '[^';]*' select [a-z ]+|print bus \d+(?:\.\d+){3} select [a-z. ]+);$/.test(command)) return command;
   return '';
 }
 
 function hasMqlError(text: string) {
   return /(?:^|\r|\n)\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:|(?:Enter\s+)?Password\s*:\s*$)/i.test(text);
+}
+
+function maskSecret(text: string) {
+  return text.replace(secretPattern, (match: string, head?: string) => (head ? `${head}****` : match));
+}
+
+function hasSecret(text: string) {
+  return maskSecret(text) !== text;
+}
+
+function configuredContext() {
+  return vscode.workspace.getConfiguration('enovia-mql').get<string>('contextCommand', '').trim();
+}
+
+function graphAvailable() {
+  return vscode.extensions.getExtension(graphExtension) !== undefined;
 }

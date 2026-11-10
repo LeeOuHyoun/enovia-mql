@@ -88,9 +88,19 @@ const efPreview = document.getElementById('ef-preview');
 const efDelete = document.getElementById('ef-delete');
 const efInsert = document.getElementById('ef-insert');
 const efRun = document.getElementById('ef-run');
+const efPromote = document.getElementById('ef-promote');
+const efDemote = document.getElementById('ef-demote');
+const efWarn = document.getElementById('ef-warn');
+const efUndo = document.getElementById('ef-undo');
+const efUndoHead = document.getElementById('ef-undo-head');
+const efUndoCopy = document.getElementById('ef-undo-copy');
+const cfWarn = document.getElementById('cf-warn');
+const ctxNode = document.getElementById('ctx');
+const contextSnippet = document.querySelector('#snippets [data-insert="context"]');
 const collapsed = new Set();
 const gridOn = new Set();
 const blockText = new Map();
+const undoHints = new Map();
 const FIND_WORD_SEPARATORS = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 let findQuery = '';
 let findIndex = 0;
@@ -187,6 +197,9 @@ const DDL_TEMPLATES = new Map([
   ['connect bus', "connect bus <from_id> relationship '<relationship>' to <to_id>;"],
 ]);
 const PLACEHOLDER = /<[A-Za-z_][\w|,.]*>/g;
+const OID = /\b\d+\.\d+\.\d+\.\d+\b/g;
+const SECRET = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
+const DEFAULT_CONTEXT = 'set context user creator;';
 const SYMBOLIC_ADMINS = new Set([
   'attribute',
   'type',
@@ -236,9 +249,34 @@ let hydrated = false;
 let splitRatio = 0.6;
 let recallWidth = 200;
 let drawerWidth = 300;
+let graphAvailable = false;
+let contextCommand = DEFAULT_CONTEXT;
+let stick = true;
 
-function follow() {
-  history.scrollTop = history.scrollHeight;
+function follow(force = false) {
+  if (force) stick = true;
+  if (stick) history.scrollTop = history.scrollHeight;
+}
+
+function maskSecret(text) {
+  return text.replace(SECRET, (match, head) => (head ? `${head}****` : match));
+}
+
+function hasSecret(text) {
+  return maskSecret(text) !== text;
+}
+
+function setContext(text) {
+  const user = /\buser\s+(.+?)(?=\s+(?:role|vault)\b|$)/i.exec(text)?.[1] ?? '';
+  const vault = /\bvault\s+(.+?)(?=\s+(?:user|role)\b|$)/i.exec(text)?.[1] ?? '';
+  ctxNode.textContent = user ? [user, vault].filter(Boolean).join(' · ') : text;
+  ctxNode.title = text ? `print context: ${text}` : '';
+  ctxNode.hidden = !text;
+}
+
+function setContextCommand(text) {
+  contextCommand = typeof text === 'string' && text.trim() ? text.trim() : DEFAULT_CONTEXT;
+  contextSnippet.title = maskSecret(contextCommand);
 }
 
 function placeCommandClear() {
@@ -345,7 +383,7 @@ function syncStatus() {
   const hasNotices = history.querySelector('.notice') !== null;
   const busy = isBusy();
   runButton.disabled = command.disabled || busy;
-  for (const button of history.querySelectorAll('.block-rerun, .block-hint button')) {
+  for (const button of history.querySelectorAll('.block-rerun, .block-hint:not(.block-undo) button')) {
     button.disabled = command.disabled || busy;
   }
   syncTx();
@@ -507,23 +545,56 @@ function findSpans(text, query, matchCase, wholeWord, useRegex) {
   return literalFindSpans(text, query, matchCase, wholeWord);
 }
 
-function paintSpans(node, text, spans) {
-  if (!spans || spans.length === 0) {
-    node.textContent = text;
-    return;
-  }
-  const frag = document.createDocumentFragment();
+function appendLinked(parent, text) {
   let from = 0;
-  for (const [start, end] of spans) {
-    if (start < from) continue;
-    if (start > from) frag.append(document.createTextNode(text.slice(from, start)));
+  for (const match of text.matchAll(OID)) {
+    if (match.index > from) parent.append(text.slice(from, match.index));
+    const link = document.createElement('span');
+    link.className = 'oid';
+    link.textContent = match[0];
+    parent.append(link);
+    from = match.index + match[0].length;
+  }
+  if (from < text.length) parent.append(text.slice(from));
+}
+
+function paintRange(parent, text, from, to, marks) {
+  let at = from;
+  for (const [start, end] of marks) {
+    if (start < at || end > to) continue;
+    if (start > at) parent.append(text.slice(at, start));
     const mark = document.createElement('mark');
     mark.className = 'hit';
     mark.textContent = text.slice(start, end);
-    frag.append(mark);
+    parent.append(mark);
+    at = end;
+  }
+  if (at < to) parent.append(text.slice(at, to));
+}
+
+function paintSpans(node, text, spans, linked = false) {
+  if (!linked && (!spans || spans.length === 0)) {
+    node.textContent = text;
+    return;
+  }
+  const marks = [];
+  for (const [start, end] of spans || []) {
+    if (start >= (marks.at(-1)?.[1] ?? 0)) marks.push([start, end]);
+  }
+  const frag = document.createDocumentFragment();
+  let from = 0;
+  for (const match of linked ? text.matchAll(OID) : []) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (marks.some(([s, e]) => s < end && e > start && (s < start || e > end))) continue;
+    paintRange(frag, text, from, start, marks);
+    const link = document.createElement('span');
+    link.className = 'oid';
+    paintRange(link, text, start, end, marks);
+    frag.append(link);
     from = end;
   }
-  if (from < text.length) frag.append(document.createTextNode(text.slice(from)));
+  paintRange(frag, text, from, text.length, marks);
   node.replaceChildren(frag);
 }
 
@@ -561,7 +632,7 @@ function paintResult(node, raw) {
   const block = node.closest('.block');
   if (block) block.classList.toggle('error', hasErrorLine(text));
   if (findQuery && !findBad) {
-    paintSpans(node, text, findSpans(text, findQuery, findMatchCase, findWholeWord, findUseRegex));
+    paintSpans(node, text, findSpans(text, findQuery, findMatchCase, findWholeWord, findUseRegex), true);
     return;
   }
   if (!text) {
@@ -576,14 +647,14 @@ function paintResult(node, raw) {
     if (ERROR_LINE.test(line)) {
       const span = document.createElement('span');
       span.className = 'res-err';
-      span.textContent = line;
+      appendLinked(span, line);
       frag.append(span);
       continue;
     }
     if (/^\s*(?:Warning\s*:|#\d+\s*:\s*Warning\b)/i.test(line)) {
       const span = document.createElement('span');
       span.className = 'res-warn';
-      span.textContent = line;
+      appendLinked(span, line);
       frag.append(span);
       continue;
     }
@@ -592,10 +663,11 @@ function paintResult(node, raw) {
       const keySpan = document.createElement('span');
       keySpan.className = 'res-key';
       keySpan.textContent = kv[1];
-      frag.append(keySpan, document.createTextNode(kv[2]));
+      frag.append(keySpan);
+      appendLinked(frag, kv[2]);
       continue;
     }
-    frag.append(document.createTextNode(line));
+    appendLinked(frag, line);
   }
   node.replaceChildren(frag);
 }
@@ -617,6 +689,7 @@ function pruneBlockState() {
   for (const id of blockText.keys()) if (!ids.has(id)) blockText.delete(id);
   for (const id of collapsed) if (!ids.has(id)) collapsed.delete(id);
   for (const id of gridOn) if (!ids.has(id)) gridOn.delete(id);
+  for (const id of undoHints.keys()) if (!ids.has(id)) undoHints.delete(id);
 }
 
 function setFolded(block, folded) {
@@ -762,11 +835,15 @@ function waitNode() {
   return wait;
 }
 
+function formatElapsed(ms) {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)}s`;
+}
+
 function blockNode(block) {
   const id = String(block.id);
   const commandText = block.command;
   const resultRaw = block.result || '';
-  blockText.set(id, { command: commandText, result: resultRaw, reset: block.reset === true });
+  blockText.set(id, { command: commandText, result: resultRaw, reset: block.reset === true, secret: block.secret === true, elapsed: block.elapsed });
   const item = document.createElement('div');
   item.className = 'block';
   item.dataset.id = id;
@@ -790,6 +867,9 @@ function blockNode(block) {
   button.type = 'button';
   button.className = 'command';
   paintText(button, commandText);
+  const time = document.createElement('span');
+  time.className = 'block-time';
+  time.textContent = block.elapsed == null ? '' : formatElapsed(block.elapsed);
   const actions = document.createElement('div');
   actions.className = 'block-actions';
   const copyBtn = document.createElement('button');
@@ -816,10 +896,18 @@ function blockNode(block) {
   gridBtn.className = 'block-grid';
   gridBtn.hidden = true;
   gridBtn.append(recallIcon('M2 3h12v10H2V3zm1 1v2h4V4H3zm5 0v2h5V4H8zM3 7v2h4V7H3zm5 0v2h5V7H8zm-5 3v2h4v-2H3zm5 0v2h5v-2H8z'));
-  actions.append(gridBtn, copyBtn, rerunBtn, stopBtn);
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'block-open';
+  openBtn.title = '편집기로 열기';
+  openBtn.setAttribute('aria-label', '편집기로 열기');
+  openBtn.append(recallIcon('M3 2h6.5L13 5.5V14H3V2zm1 1v10h8V6H9V3H4z'));
+  actions.append(gridBtn, openBtn, copyBtn);
+  if (!block.secret) actions.append(rerunBtn);
+  actions.append(stopBtn);
   const result = document.createElement('pre');
   result.className = 'result';
-  head.append(fold, button, actions);
+  head.append(fold, button, time, actions);
   item.append(head, result, waitNode());
   if (block.reset) item.append(resetNode());
   paintResult(result, resultRaw);
@@ -925,10 +1013,17 @@ function gridNode(grid) {
   const body = table.createTBody();
   for (const row of grid.rows) {
     const line = body.insertRow();
-    for (let i = 0; i < grid.head.length; i += 1) line.insertCell().textContent = row[i] ?? '';
+    for (let i = 0; i < grid.head.length; i += 1) appendLinked(line.insertCell(), row[i] ?? '');
   }
   wrap.append(table);
   return wrap;
+}
+
+function blockContent(block) {
+  const stored = block ? blockText.get(block.dataset.id) : null;
+  if (!stored) return '';
+  const grid = block.classList.contains('grid') ? gridOf(stored) : null;
+  return grid ? gridTsv(grid) : cleanResult(stored.result) || stored.command;
 }
 
 function setGrid(block, on) {
@@ -962,22 +1057,66 @@ function sameCommand(a, b) {
   return norm(a) === norm(b);
 }
 
-function symbolicCommand(cmd) {
+function symbolicTarget(cmd) {
   const m = cmd.trim().match(/^add\s+([a-z]+)\s+(?:'([^']+)'|"([^"]+)"|([^\s;'"]+))/i);
-  if (!m) return '';
+  if (!m) return null;
   const admin = m[1].toLowerCase();
-  if (!SYMBOLIC_ADMINS.has(admin)) return '';
+  if (!SYMBOLIC_ADMINS.has(admin)) return null;
   const name = m[2] ?? m[3] ?? m[4];
+  const target = formatSchemaName(name);
+  if (!target) return null;
   const suffix = admin === 'table' ? ' system' : '';
-  return `add property ${admin}_${name.replace(/\s+/g, '')} on program eServiceSchemaVariableMapping.tcl to ${admin} ${formatSchemaName(name)}${suffix};`;
+  return { admin, name, cmd: `add property ${admin}_${name.replace(/\s+/g, '')} on program eServiceSchemaVariableMapping.tcl to ${admin} ${target}${suffix};` };
+}
+
+let symbolics = null;
+let symbolicsFailed = false;
+let symbolicsLoad = null;
+let symbolicsGen = 0;
+
+function parseSymbolics(raw) {
+  const map = new Map();
+  for (const line of cleanResult(raw).split('\n')) {
+    const m = line.trim().match(/^(\S+)\s+on\s+program\s+\S+\s+to\s+(\w+)\s+(.+?)\s*$/);
+    if (!m) continue;
+    const name = m[3].replace(/\s+system$/i, '').replace(/^(['"])(.*)\1$/, '$2');
+    map.set(`${m[2].toLowerCase()} ${name}`, m[1]);
+  }
+  return map;
+}
+
+function loadSymbolics() {
+  const gen = symbolicsGen;
+  symbolicsLoad ??= requestMeta('list property on program eServiceSchemaVariableMapping.tcl').then((raw) => {
+    if (gen !== symbolicsGen) return null;
+    if (raw == null || hasErrorLine(cleanResult(raw))) symbolicsFailed = true;
+    else symbolics = parseSymbolics(raw);
+    return symbolics;
+  });
+  return symbolicsLoad;
+}
+
+function forgetSymbolics() {
+  symbolicsGen += 1;
+  symbolics = null;
+  symbolicsFailed = false;
+  symbolicsLoad = null;
 }
 
 function symbolicHint(item) {
   const stored = blockText.get(item.dataset.id);
-  if (!stored || item.querySelector('.block-hint')) return;
-  const cmd = symbolicCommand(stored.command);
-  if (!cmd || hasErrorLine(cleanResult(stored.result))) return;
-  if ([...blockText.values()].some((b) => sameCommand(b.command, cmd))) return;
+  if (!stored || item.querySelector('.block-hint:not(.block-undo)')) return;
+  const target = symbolicTarget(stored.command);
+  if (!target || hasErrorLine(cleanResult(stored.result))) return;
+  if ([...blockText.values()].some((b) => sameCommand(b.command, target.cmd))) return;
+  if (!symbolics && !symbolicsFailed) {
+    void loadSymbolics().then(() => {
+      if (item.isConnected && (symbolics || symbolicsFailed)) symbolicHint(item);
+    });
+    return;
+  }
+  if (symbolics?.has(`${target.admin} ${target.name}`)) return;
+  const cmd = target.cmd;
   const hint = document.createElement('div');
   hint.className = 'block-hint';
   hint.dataset.cmd = cmd;
@@ -992,21 +1131,42 @@ function symbolicHint(item) {
   item.append(hint);
 }
 
+function undoHint(item) {
+  const undo = undoHints.get(item.dataset.id);
+  if (!undo || item.querySelector('.block-undo')) return;
+  const hint = document.createElement('div');
+  hint.className = 'block-hint block-undo';
+  hint.dataset.undo = undo.text;
+  const label = document.createElement('span');
+  label.textContent = `${undo.label}: ${undo.text}`;
+  const insert = document.createElement('button');
+  insert.type = 'button';
+  insert.textContent = '입력창에 넣기';
+  hint.append(label, insert);
+  item.append(hint);
+}
+
 function render(state) {
   if ('runningId' in state) runningId = state.runningId == null ? null : state.runningId;
   if (!hydrated && state.prefs) hydratePrefs(state.prefs);
+  graphAvailable = state.graph === true;
+  setContext(typeof state.context === 'string' ? state.context : '');
+  setContextCommand(state.contextCommand);
   const nodes = [];
   for (const notice of state.notices) nodes.push(noticeNode(notice));
   for (const block of state.blocks) nodes.push(blockNode(block));
   history.replaceChildren(...nodes);
   pruneBlockState();
-  for (const item of history.querySelectorAll('.block:not(.pending)')) symbolicHint(item);
+  for (const item of history.querySelectorAll('.block:not(.pending)')) {
+    symbolicHint(item);
+    undoHint(item);
+  }
   ensureRecall(state.blocks);
   markRecall();
   recomputeTx(state.blocks);
   setInputEnabled(state.inputEnabled);
   setClearEnabled(state.clearEnabled);
-  follow();
+  follow(true);
   syncFind(false);
 }
 
@@ -1030,7 +1190,7 @@ function savePrefs() {
       recalls: collectRecalls(),
       jpoOpen: jpo.classList.contains('on'),
       jpoPath: jpoPath.value,
-      commandText: command.value,
+      commandText: hasSecret(command.value) ? '' : command.value,
       splitRatio,
       recallWidth,
       drawerWidth,
@@ -1226,6 +1386,7 @@ function setRecallWidth(width) {
 function ensureRecall(blocks) {
   let changed = false;
   for (const block of blocks) {
+    if (block.secret) continue;
     addRecall(block.id, block.command, false);
     changed = true;
   }
@@ -1236,6 +1397,36 @@ function markRecall() {
   const ids = new Set();
   for (const item of history.querySelectorAll('.block')) ids.add(item.dataset.id);
   for (const item of recallList.children) item.classList.toggle('missing', !ids.has(item.dataset.id));
+}
+
+let historyAt = -1;
+let historyDraft = '';
+let historyItems = [];
+
+function historyList() {
+  const rows = [...recallList.children].filter((row) => row.dataset.text);
+  const recent = rows.filter((row) => row.dataset.id).sort((a, b) => Number(b.dataset.id) - Number(a.dataset.id));
+  return [...recent, ...rows.filter((row) => !row.dataset.id)].map((row) => row.dataset.text);
+}
+
+function isHistoryKey(event) {
+  return event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && !event.isComposing && (event.key === 'ArrowUp' || event.key === 'ArrowDown');
+}
+
+function stepHistory(step) {
+  if (command.disabled) return;
+  if (historyAt === -1) {
+    historyItems = historyList();
+    historyDraft = command.value;
+  }
+  const next = Math.min(historyItems.length - 1, Math.max(-1, historyAt + step));
+  if (next === historyAt) return;
+  historyAt = next;
+  recordCommand();
+  command.value = historyAt === -1 ? historyDraft : historyItems[historyAt];
+  command.setSelectionRange(command.value.length, command.value.length);
+  syncCommandClear();
+  savePrefs();
 }
 
 function blockById(id) {
@@ -1436,6 +1627,18 @@ function isStarterSequence(words, index) {
   return true;
 }
 
+function isSchemaDdl(words) {
+  const w0 = words[0]?.value.toLowerCase() || '';
+  const w1 = words[1]?.value.toLowerCase() || '';
+  return (w0 === 'add' || w0 === 'modify' || w0 === 'mod') && MQL_HEADER_TARGETS.has(w1) && w1 !== 'bus' && w1 !== 'businessobject';
+}
+
+function continuesDdl(words, next) {
+  if (!isSchemaDdl(words)) return false;
+  if (next === 'add') return words[0].value.toLowerCase() !== 'add';
+  return DDL_WORDS.has(next);
+}
+
 function splitMqlStatements(text) {
   const tokens = tokenizeMql(text);
   const statements = [];
@@ -1473,7 +1676,7 @@ function splitMqlStatements(text) {
         if (tokens[k].type === 'semi' || tokens[k].type === 'newline') break;
         if (tokens[k].type === 'word') restWords.push(tokens[k]);
       }
-      if (isStarterSequence(restWords, 0)) {
+      if (isStarterSequence(restWords, 0) && !continuesDdl(current, restWords[0].value.toLowerCase())) {
         flush();
       } else {
         afterNewline = false;
@@ -1576,6 +1779,8 @@ const DDL_FIELD_SUBS = new Set([
   'update',
 ]);
 
+const DDL_WORDS = new Set([...DDL_L1_BREAKS, ...DDL_STATE_SUBS, ...DDL_REL_SUBS, ...DDL_FIELD_SUBS, 'add', 'remove']);
+
 function isClauseBreak(words, idx, headerEnd) {
   if (idx < headerEnd) return false;
   const lower = words[idx].value.toLowerCase();
@@ -1596,7 +1801,7 @@ function isClauseBreak(words, idx, headerEnd) {
   if ((w0 === 'modify' || w0 === 'mod' || w0 === 'add') && (w1 === 'bus' || w1 === 'businessobject') && (lower === 'description' || lower === 'policy' || lower === 'vault' || lower === 'owner' || lower === 'current' || lower === 'state')) {
     return true;
   }
-  if ((w0 === 'add' || w0 === 'modify' || w0 === 'mod') && MQL_HEADER_TARGETS.has(w1) && w1 !== 'bus' && w1 !== 'businessobject') {
+  if (isSchemaDdl(words)) {
     if (prev === 'add' || prev === 'remove' || prev === 'modify' || prev === 'mod') return false;
     if (lower === 'add' || lower === 'remove') return true;
     if (DDL_L1_BREAKS.has(lower) || DDL_STATE_SUBS.has(lower) || DDL_REL_SUBS.has(lower) || DDL_FIELD_SUBS.has(lower)) return true;
@@ -1607,9 +1812,7 @@ function isClauseBreak(words, idx, headerEnd) {
 function formatSingleStatement(words) {
   if (words.length === 0) return '';
   const headerEnd = minHeaderLength(words);
-  const w0 = words[0].value.toLowerCase();
-  const w1 = words[1]?.value.toLowerCase() || '';
-  const isSchemaDdl = (w0 === 'add' || w0 === 'modify' || w0 === 'mod') && MQL_HEADER_TARGETS.has(w1) && w1 !== 'bus' && w1 !== 'businessobject';
+  const isDdl = isSchemaDdl(words);
   const lines = [];
   let currentLine = [];
   let currentIndent = '';
@@ -1617,7 +1820,7 @@ function formatSingleStatement(words) {
   let inSelect = false;
 
   const indentFor = (lower) => {
-    if (!isSchemaDdl) return '  ';
+    if (!isDdl) return '  ';
     if (lower === 'state' || lower === 'allstate' || lower === 'from' || lower === 'to' || lower === 'field' || lower === 'column') {
       section = lower;
       return '  ';
@@ -2050,10 +2253,7 @@ function isObjectId(text) {
 
 function formatSchemaName(name) {
   const trimmed = name.trim();
-  if (!trimmed) return '';
-  if (/^['"].*['"]$/.test(trimmed)) return trimmed;
-  if (/[\s'"]/.test(trimmed)) return `'${trimmed.replace(/'/g, "\\'")}'`;
-  return `'${trimmed}'`;
+  return trimmed ? mqlQuote(trimmed) ?? '' : '';
 }
 
 function buildPrintSchemaCommand(kind, name) {
@@ -2086,6 +2286,7 @@ function openPick(x, y, inResult = true) {
   const editBtn = pick.querySelector('[data-act="editBus"]');
   editBtn.hidden = !oid;
   editBtn.disabled = command.disabled;
+  pick.querySelector('[data-act="graphBus"]').hidden = !oid || !graphAvailable;
   placeFixed(pick, x, y);
 }
 
@@ -2200,6 +2401,19 @@ function appendList(flush) {
     frag.append(row);
   }
   listView.append(frag);
+}
+
+function annotateList(kind) {
+  if (!symbolics) return;
+  for (const row of listView.children) {
+    const symbolic = symbolics.get(`${kind} ${row.dataset.name}`);
+    if (!symbolic || row.querySelector('.list-sym')) continue;
+    const span = document.createElement('span');
+    span.className = 'list-sym';
+    span.textContent = symbolic;
+    row.append(span);
+    row.title = `${row.dataset.name} (${symbolic})`;
+  }
 }
 
 function applyListFilter() {
@@ -2390,6 +2604,12 @@ function onSideEnd(message) {
     }
     schemaCache.set(sentKind, names);
     setDrawerNote(listView.children.length === 0 ? '결과가 없습니다.' : '');
+    const kind = sentKind;
+    if (SYMBOLIC_ADMINS.has(kind) && names.length > 0) {
+      void loadSymbolics().then(() => {
+        if (listFetchedKind === kind) annotateList(kind);
+      });
+    }
   } else if (!superseded) setDrawerNote('조회하지 못했습니다.');
   syncDrawerControls();
   flushQueuedSide();
@@ -2401,6 +2621,7 @@ const attrMeta = new Map();
 let metaActive = null;
 let metaRaw = '';
 let cfTypeLoaded = '';
+let cfTypeInfo = null;
 let cfPolicyLoaded = '';
 let cfPolicyAuto = false;
 
@@ -2426,16 +2647,18 @@ function dropMeta() {
   metaActive = null;
 }
 
-function selectValues(raw, key) {
-  if (raw == null) return null;
-  const text = cleanResult(raw);
-  if (hasErrorLine(text)) return null;
+function keyValues(raw, key) {
   const values = [];
-  for (const line of text.split('\n')) {
+  for (const line of cleanResult(raw ?? '').split('\n')) {
     const m = line.match(/^\s*([\w.]+)\s=\s?(.*)$/);
     if (m && m[1] === key) values.push(m[2].trim());
   }
   return values;
+}
+
+function selectValues(raw, key) {
+  if (raw == null || hasErrorLine(cleanResult(raw))) return null;
+  return keyValues(raw, key);
 }
 
 function rangeValue(value) {
@@ -2446,7 +2669,9 @@ function rangeValue(value) {
 }
 
 function mqlQuote(value) {
-  return value.includes("'") && !value.includes('"') ? `"${value}"` : `'${value}'`;
+  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes('"')) return `"${value}"`;
+  return null;
 }
 
 function fillDatalist(list, names) {
@@ -2484,8 +2709,16 @@ async function loadType() {
   const type = cfType.value.trim();
   if (!type || type === cfTypeLoaded) return;
   cfTypeLoaded = type;
+  cfTypeInfo = null;
+  const quoted = mqlQuote(type);
+  if (!quoted) {
+    renderAttrs([]);
+    setCreateNote('작은따옴표와 큰따옴표가 함께 든 type 이름은 조회할 수 없습니다.');
+    syncCreate();
+    return;
+  }
   setCreateNote('type 정보 조회 중');
-  const raw = await requestMeta(`print type '${type}' select policy attribute`);
+  const raw = await requestMeta(`print type ${quoted} select policy attribute`);
   if (cfTypeLoaded !== type) return;
   const policies = selectValues(raw, 'policy');
   const attrs = selectValues(raw, 'attribute');
@@ -2505,20 +2738,55 @@ async function loadType() {
   renderAttrs(attrs);
   setCreateNote(attrs.length === 0 ? '속성이 없습니다.' : '');
   syncCreate();
+  const info = await loadTypeInfo(type, quoted, () => cfTypeLoaded === type);
+  if (cfTypeLoaded !== type) return;
+  cfTypeInfo = info && { ...info, type, policies };
+  syncCreate();
+}
+
+async function loadTypeInfo(type, quoted, alive) {
+  const raw = await requestMeta(`print type ${quoted} select abstract\nprint type ${quoted} select derived`);
+  if (!alive() || raw == null) return null;
+  const chain = [type];
+  let parent = keyValues(raw, 'derived')[0] || '';
+  while (parent && !chain.includes(parent) && chain.length < 20) {
+    chain.push(parent);
+    const next = mqlQuote(parent);
+    const more = next ? await requestMeta(`print type ${next} select derived`) : null;
+    if (!alive()) return null;
+    parent = keyValues(more, 'derived')[0] || '';
+  }
+  return { abstract: /^true$/i.test(keyValues(raw, 'abstract')[0] || ''), chain };
+}
+
+function attrMetaBlocks(raw) {
+  const metas = new Map();
+  let current = null;
+  for (const line of cleanResult(raw).split('\n')) {
+    const m = line.match(/^\s*(name|type|default|range)\s=\s?(.*)$/);
+    if (!m) continue;
+    const value = m[2].trim();
+    if (m[1] === 'name') {
+      current = { type: '', def: '', ranges: [] };
+      metas.set(value, current);
+    } else if (!current) continue;
+    else if (m[1] === 'type') current.type = value;
+    else if (m[1] === 'default') current.def = value;
+    else current.ranges.push(...rangeValue(value));
+  }
+  return metas;
 }
 
 async function loadAttrMeta(names, alive, note) {
-  for (let i = 0; i < names.length; i += 1) {
-    if (attrMeta.has(names[i])) continue;
-    note(`속성 정보 조회 중 (${i + 1}/${names.length})`);
-    const meta = await requestMeta(`print attribute '${names[i]}' select type default range`);
-    if (!alive()) return false;
-    attrMeta.set(names[i], {
-      type: selectValues(meta, 'type')?.[0] || '',
-      def: selectValues(meta, 'default')?.[0] || '',
-      ranges: (selectValues(meta, 'range') || []).flatMap(rangeValue),
-    });
-  }
+  const missing = names.filter((name) => !attrMeta.has(name));
+  const quoted = missing.filter((name) => !name.includes(';')).map(mqlQuote).filter(Boolean);
+  if (quoted.length === 0) return true;
+  note(`속성 정보 조회 중 (${quoted.length}건)`);
+  const raw = await requestMeta(quoted.map((name) => `print attribute ${name} select name type default range`).join('\n'));
+  if (!alive()) return false;
+  if (raw == null) return true;
+  const metas = attrMetaBlocks(raw);
+  for (const name of missing) attrMeta.set(name, metas.get(name) || { type: '', def: '', ranges: [] });
   return true;
 }
 
@@ -2526,7 +2794,8 @@ async function loadPolicy() {
   const policy = cfPolicy.value.trim();
   if (!policy || policy === cfPolicyLoaded) return;
   cfPolicyLoaded = policy;
-  const raw = await requestMeta(`print policy '${policy}' select state`);
+  const quoted = mqlQuote(policy);
+  const raw = quoted ? await requestMeta(`print policy ${quoted} select state`) : null;
   if (cfPolicyLoaded !== policy) return;
   fillDatalist(cfStates, selectValues(raw, 'state') || []);
 }
@@ -2637,7 +2906,12 @@ function renderAttrs(names) {
   cfAttrs.replaceChildren(...nodes);
   fillControls(cfAttrs, kept);
   renderGridHead();
-  for (const row of [...cfRowsBody.rows]) row.replaceWith(gridRowNode(readControls(row)));
+  for (const row of [...cfRowsBody.rows]) {
+    const next = gridRowNode(readControls(row));
+    if (row.dataset.status) next.dataset.status = row.dataset.status;
+    swapRow(row, next);
+    row.replaceWith(next);
+  }
   if (!focusKey || active.isConnected) return;
   const root = focusIndex >= 0 ? cfRowsBody.rows[focusIndex] : cfAttrs;
   const target = root && [...cfControls(root)].find((control) => controlKey(control) === focusKey);
@@ -2645,23 +2919,38 @@ function renderAttrs(names) {
 }
 
 function createLines(values) {
-  const field = (value, hole) => mqlQuote(value || hole);
+  const bad = [];
+  const quote = (value, label) => {
+    const text = mqlQuote(value);
+    if (text == null) bad.push(label);
+    return text ?? `'${value}'`;
+  };
+  const field = (value, hole, label) => quote(value || hole, label);
   const lines = [
-    `add bus ${field(cfType.value.trim(), '<type>')} ${field(values.get('name'), '<name>')} ${mqlQuote(values.get('rev') || '')}`,
-    `policy ${field(cfPolicy.value.trim(), '<policy>')}`,
-    `vault ${field(cfVault.value.trim(), '<vault>')}`,
+    `add bus ${field(cfType.value.trim(), '<type>', 'Type')} ${field(values.get('name'), '<name>', 'Name')} ${quote(values.get('rev') || '', 'Revision')}`,
+    `policy ${field(cfPolicy.value.trim(), '<policy>', 'Policy')}`,
+    `vault ${field(cfVault.value.trim(), '<vault>', 'Vault')}`,
   ];
   for (const [key, raw] of values) {
     const value = raw.trim();
     if (!value || key === 'name' || key === 'rev') continue;
-    lines.push(key.startsWith('@') ? `${mqlQuote(key.slice(1))} ${mqlQuote(value)}` : `${key} ${mqlQuote(value)}`);
+    const label = key.startsWith('@') ? key.slice(1) : key;
+    lines.push(key.startsWith('@') ? `${quote(label, label)} ${quote(value, label)}` : `${key} ${quote(value, label)}`);
   }
   lines.push('select id dump;');
-  return lines;
+  return { lines, bad };
 }
 
 function isGridMode() {
   return createView.classList.contains('grid');
+}
+
+function isFilled(row) {
+  return [...cfControls(row)].some((control) => control.value.trim());
+}
+
+function isWaiting(row) {
+  return row.dataset.status !== 'done' && row.dataset.status !== 'run';
 }
 
 function createStatements() {
@@ -2670,26 +2959,147 @@ function createStatements() {
     return [createLines(single)];
   }
   const rows = [...cfRowsBody.rows];
-  const filled = rows.filter((row) => [...cfControls(row)].some((control) => control.value.trim()));
-  return (filled.length > 0 ? filled : rows.slice(0, 1)).map((row) => createLines(readControls(row)));
+  const filled = rows.filter(isFilled);
+  if (filled.length === 0) return rows.slice(0, 1).map((row) => createLines(readControls(row)));
+  return filled.filter(isWaiting).map((row) => createLines(readControls(row)));
 }
 
 function createText(statements) {
-  return statements.map((lines) => lines.join('\n  ')).join('\n');
+  return statements.map(({ lines }) => lines.join('\n  ')).join('\n');
+}
+
+function renderWarnings(list, items) {
+  list.replaceChildren(...items.map((text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+  list.hidden = items.length === 0;
+}
+
+function quoteWarning(labels) {
+  return labels.length > 0 && `작은따옴표와 큰따옴표가 함께 들어 있어 MQL 문장으로 만들 수 없습니다: ${[...new Set(labels)].join(', ')}`;
+}
+
+function syncCreateWarnings(bad) {
+  const type = cfType.value.trim();
+  const info = cfTypeInfo?.type === type ? cfTypeInfo : null;
+  renderWarnings(cfWarn, [
+    type && cfTypes.options.length > 0 && !isListed(cfTypes, type) && 'type 목록에 없는 이름입니다. 정확한 type 이름인지 확인하세요.',
+    info?.abstract && 'abstract type이라 객체를 만들 수 없습니다.',
+    info?.chain.some((name) => /^PLM(?:Core|Entity)/.test(name)) && 'VPM/PLM 계열 type입니다. CATIA 설계 데이터는 MQL로 만들면 구조가 어긋날 수 있습니다.',
+    info && info.policies.length === 0 && '이 type에 쓸 수 있는 policy를 찾지 못했습니다.',
+    !isGridMode() && cfDuplicate && `같은 Type · Name · Revision 객체가 이미 있습니다. (${cfDuplicate})`,
+    quoteWarning(bad),
+  ].filter(Boolean));
 }
 
 function syncCreate() {
   const statements = createStatements();
-  cfPreview.textContent = createText(statements);
-  cfInsert.disabled = command.disabled;
-  cfRun.disabled = command.disabled || sideBusy || statements.some((lines) => placeholderSpans(lines.join(' ')).length > 0);
+  const bad = statements.flatMap((statement) => statement.bad);
+  const done = statements.length === 0;
+  cfPreview.textContent = done ? '모든 행을 실행했습니다.' : createText(statements);
+  cfInsert.disabled = command.disabled || done;
+  cfRun.disabled = command.disabled || sideBusy || done || bad.length > 0 || cfRowsBody.querySelector('tr[data-status="run"]') !== null || statements.some(({ lines }) => placeholderSpans(lines.join(' ')).length > 0);
+  syncCreateWarnings(bad);
 }
 
 function setCreateMode(grid) {
   createView.classList.toggle('grid', grid);
   cfModeOne.setAttribute('aria-pressed', grid ? 'false' : 'true');
   cfModeGrid.setAttribute('aria-pressed', grid ? 'true' : 'false');
+  dupKey = '';
+  scheduleDuplicate();
   syncCreate();
+}
+
+let cfDuplicate = '';
+let dupKey = '';
+let dupTimer = 0;
+
+function scheduleDuplicate() {
+  clearTimeout(dupTimer);
+  dupTimer = setTimeout(() => {
+    void checkDuplicate();
+  }, 500);
+}
+
+async function checkDuplicate() {
+  const type = cfType.value.trim();
+  const name = document.getElementById('cf-name').value.trim();
+  const rev = document.getElementById('cf-rev').value.trim();
+  const key = isGridMode() ? '' : JSON.stringify([type, name, rev]);
+  if (key === dupKey) return;
+  dupKey = key;
+  cfDuplicate = '';
+  syncCreate();
+  if (!key || !type || !name || /[*?]/.test(`${type}${name}${rev}`) || !isListed(cfTypes, type)) return;
+  const parts = [type, name, rev || '*'].map(mqlQuote);
+  if (parts.some((part) => !part)) return;
+  const raw = await requestMeta(`temp query bus ${parts.join(' ')} select id dump '|~|'`);
+  if (dupKey !== key || raw == null) return;
+  const found = cleanResult(raw).split('\n').map((line) => line.trim().split('|~|')).find((fields) => fields.length >= 4 && fields[0] === type && fields[1] === name && fields[2] === rev);
+  cfDuplicate = found ? found[3] : '';
+  syncCreate();
+}
+
+let batchToken = 0;
+const batchRows = new Map();
+const rowOfBlock = new Map();
+
+function runBatch() {
+  const rows = [...cfRowsBody.rows].filter((row) => isWaiting(row) && isFilled(row));
+  if (rows.length === 0) return;
+  batchToken += 1;
+  for (const row of rows) row.dataset.status = 'run';
+  batchRows.set(batchToken, { rows, queue: [...rows] });
+  setCreateNote('');
+  vscode.postMessage({ type: 'batch', batch: batchToken, texts: rows.map((row) => createLines(readControls(row)).lines.join(' ')) });
+  syncCreate();
+}
+
+function swapRow(row, next) {
+  for (const entry of batchRows.values()) {
+    entry.rows = entry.rows.map((item) => (item === row ? next : item));
+    entry.queue = entry.queue.map((item) => (item === row ? next : item));
+  }
+  for (const entry of rowOfBlock.values()) if (entry.row === row) entry.row = next;
+}
+
+function mapRow(message) {
+  const row = batchRows.get(message.batch)?.queue.shift();
+  if (row) rowOfBlock.set(String(message.id), { row, batch: message.batch });
+}
+
+function settleRow(id, stored) {
+  const entry = rowOfBlock.get(id);
+  if (!entry) return;
+  entry.row.dataset.status = hasErrorLine(cleanResult(stored.result)) ? 'fail' : 'done';
+  syncCreate();
+}
+
+function failRow(id) {
+  const entry = rowOfBlock.get(id);
+  if (!entry) return;
+  entry.row.dataset.status = 'fail';
+  syncCreate();
+}
+
+function endBatch(batch) {
+  const entry = batchRows.get(batch);
+  if (!entry) return;
+  batchRows.delete(batch);
+  for (const [id, item] of rowOfBlock) if (item.batch === batch) rowOfBlock.delete(id);
+  for (const row of entry.rows) if (row.dataset.status === 'run') delete row.dataset.status;
+  const failed = entry.rows.find((row) => row.dataset.status === 'fail' && row.isConnected);
+  setCreateNote(failed ? `${failed.sectionRowIndex + 1}번째 행에서 오류가 나 멈췄습니다. 고친 뒤 실행하면 실패한 행부터 다시 실행합니다.` : '');
+  syncCreate();
+}
+
+function resetBatches() {
+  batchRows.clear();
+  rowOfBlock.clear();
+  for (const row of cfRowsBody.rows) delete row.dataset.status;
 }
 
 function addGridRow() {
@@ -2713,9 +3123,13 @@ function removeGridRow(row) {
 }
 
 const EF_SELECT = 'type name revision policy vault current owner description attribute attribute.value';
+const EF_KEY = /^\s*(type|name|revision|policy|vault|current|owner|description|attribute|attribute\.value|attribute\[[^\]]+\]\.value)\s=\s?(.*)$/;
+const UNDO_LABEL = '되돌리는 문장';
+const RECREATE_LABEL = '다시 만드는 문장 (ID·이력·연결은 복원되지 않음)';
 let efLoaded = '';
 let efOrigin = new Map();
-let efReload = '';
+let efReload = null;
+let efStates = [];
 
 function setEditNote(text) {
   efNote.hidden = text === '';
@@ -2730,17 +3144,53 @@ function busValues(raw) {
   const attrs = new Map();
   const names = [];
   const values = [];
+  let append = null;
+  let blanks = 0;
   for (const line of text.split('\n')) {
-    const m = line.match(/^\s*(attribute\[[^\]]+\]\.value|[\w.]+)\s=\s?(.*)$/);
-    if (!m) continue;
-    const named = m[1].match(/^attribute\[(.+)\]\.value$/);
-    if (named) attrs.set(named[1], m[2]);
-    else if (m[1] === 'attribute') names.push(m[2].trim());
-    else if (m[1] === 'attribute.value') values.push(m[2]);
-    else if (!basics.has(m[1])) basics.set(m[1], m[2]);
+    const m = line.match(EF_KEY);
+    if (!m) {
+      if (!append) continue;
+      if (line.trim()) {
+        append(`${'\n'.repeat(blanks + 1)}${line.trim()}`);
+        blanks = 0;
+      } else blanks += 1;
+      continue;
+    }
+    blanks = 0;
+    const [, key, value] = m;
+    const named = key.match(/^attribute\[(.+)\]\.value$/);
+    if (named) {
+      attrs.set(named[1], value);
+      append = (more) => attrs.set(named[1], attrs.get(named[1]) + more);
+    } else if (key === 'attribute') {
+      names.push(value.trim());
+      append = null;
+    } else if (key === 'attribute.value') {
+      const at = values.push(value) - 1;
+      append = (more) => {
+        values[at] += more;
+      };
+    } else if (!basics.has(key)) {
+      basics.set(key, value);
+      append = (more) => basics.set(key, basics.get(key) + more);
+    } else append = null;
   }
   if (attrs.size === 0) names.forEach((name, i) => attrs.set(name, values[i] ?? ''));
   return basics.size > 0 ? { basics, attrs } : null;
+}
+
+function fitText(control, value) {
+  if (!(control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement)) return control;
+  const multi = value.includes('\n');
+  if (multi === (control instanceof HTMLTextAreaElement)) return control;
+  const next = document.createElement(multi ? 'textarea' : 'input');
+  next.id = control.id;
+  next.className = control.className;
+  Object.assign(next.dataset, control.dataset);
+  next.spellcheck = false;
+  next.autocomplete = 'off';
+  if (multi) next.rows = Math.min(8, value.split('\n').length);
+  return next;
 }
 
 function renderEdit(data) {
@@ -2750,10 +3200,14 @@ function renderEdit(data) {
   efVault.value = basics.get('vault') ?? '';
   efState.value = basics.get('current') ?? '';
   efOrigin = new Map(['name', 'revision', 'owner', 'description'].map((key) => [key, basics.get(key) ?? '']));
+  const desc = editView.querySelector('[data-key="description"]');
+  const fitted = fitText(desc, efOrigin.get('description'));
+  if (fitted !== desc) desc.replaceWith(fitted);
   const nodes = [];
   for (const [name, value] of data?.attrs ?? []) {
     efOrigin.set(`@${name}`, value);
-    const [label, control] = attrField(name, `ef-attr-${nodes.length}`);
+    const [label, made] = attrField(name, `ef-attr-${nodes.length}`);
+    const control = fitText(made, value);
     if (control instanceof HTMLSelectElement && ![...control.options].some((option) => option.value === value)) control.append(new Option(value, value));
     nodes.push(label, control);
   }
@@ -2770,6 +3224,7 @@ async function loadEdit(oid = efOid.value.trim()) {
     return;
   }
   efLoaded = oid;
+  efStates = [];
   renderEdit(null);
   setEditNote('객체 조회 중');
   const data = busValues(await requestMeta(`print bus ${oid} select ${EF_SELECT}`));
@@ -2782,6 +3237,16 @@ async function loadEdit(oid = efOid.value.trim()) {
   if (!(await loadAttrMeta(names, () => efLoaded === oid, setEditNote))) return;
   renderEdit(data);
   setEditNote(names.length === 0 ? '속성이 없습니다.' : '');
+  await loadEditStates(data.basics.get('policy') ?? '', oid);
+}
+
+async function loadEditStates(policy, oid) {
+  const quoted = policy ? mqlQuote(policy) : null;
+  if (!quoted) return;
+  const raw = await requestMeta(`print policy ${quoted} select state`);
+  if (efLoaded !== oid) return;
+  efStates = selectValues(raw, 'state') || [];
+  syncEdit();
 }
 
 function openEdit(oid) {
@@ -2790,45 +3255,118 @@ function openEdit(oid) {
   void loadEdit(oid);
 }
 
-function editLines() {
-  if (efOrigin.size === 0) return [];
-  const values = readControls(editView);
+function quoteInto(labels) {
+  return (value, label) => {
+    const text = mqlQuote(value);
+    if (text == null) labels.push(label);
+    return text;
+  };
+}
+
+function modParts(values, pick, quote) {
   const changed = (key) => values.get(key) !== efOrigin.get(key);
   const parts = [];
-  if (changed('name') || changed('revision')) parts.push(`name ${mqlQuote(values.get('name'))} revision ${mqlQuote(values.get('revision'))}`);
-  for (const [key, value] of values) {
-    if (key === 'name' || key === 'revision' || !changed(key)) continue;
-    parts.push(key.startsWith('@') ? `${mqlQuote(key.slice(1))} ${mqlQuote(value)}` : `${key} ${mqlQuote(value)}`);
+  if (changed('name') || changed('revision')) {
+    const name = quote(pick('name') ?? '', 'Name');
+    const revision = quote(pick('revision') ?? '', 'Revision');
+    if (name && revision) parts.push(`name ${name} revision ${revision}`);
   }
-  if (parts.length === 0) return [];
-  parts[parts.length - 1] += ';';
-  return [`mod bus ${efLoaded}`, ...parts];
+  for (const key of values.keys()) {
+    if (key === 'name' || key === 'revision' || !changed(key)) continue;
+    const label = key.startsWith('@') ? key.slice(1) : key;
+    const head = key.startsWith('@') ? quote(label, label) : key;
+    const value = quote(pick(key) ?? '', label);
+    if (head && value) parts.push(`${head} ${value}`);
+  }
+  return parts;
+}
+
+function editLines() {
+  const bad = [];
+  const skipped = [];
+  if (efOrigin.size === 0) return { lines: [], undo: [], bad, skipped };
+  const values = readControls(editView);
+  const statement = (parts) => (parts.length > 0 ? [`mod bus ${efLoaded}`, ...parts.slice(0, -1), `${parts[parts.length - 1]};`] : []);
+  return {
+    lines: statement(modParts(values, (key) => values.get(key), quoteInto(bad))),
+    undo: statement(modParts(values, (key) => efOrigin.get(key), quoteInto(skipped))),
+    bad,
+    skipped,
+  };
+}
+
+function recreateText() {
+  const skipped = [];
+  const quote = quoteInto(skipped);
+  const head = [['Type', efType.value], ['Name', efOrigin.get('name') ?? ''], ['Revision', efOrigin.get('revision') ?? ''], ['Policy', efPolicy.value], ['Vault', efVault.value]].map(([label, value]) => quote(value, label));
+  if (head.some((part) => part == null)) return { text: '', skipped };
+  const parts = [`add bus ${head[0]} ${head[1]} ${head[2]}`, `policy ${head[3]}`, `vault ${head[4]}`];
+  for (const key of ['owner', 'description']) {
+    const value = efOrigin.get(key) ?? '';
+    const text = value ? quote(value, key) : null;
+    if (text) parts.push(`${key} ${text}`);
+  }
+  for (const [key, value] of efOrigin) {
+    if (!key.startsWith('@')) continue;
+    const name = key.slice(1);
+    if (!value && !attrMetaOf(name).def) continue;
+    const attr = quote(name, name);
+    const text = quote(value, name);
+    if (attr && text) parts.push(`${attr} ${text}`);
+  }
+  return { text: `${parts.join(' ')};`, skipped };
 }
 
 function syncEdit() {
-  const lines = editLines();
-  efPreview.textContent = lines.length > 0 ? lines.join('\n  ') : efOrigin.size > 0 ? '변경 사항이 없습니다.' : '';
-  efInsert.disabled = command.disabled || lines.length === 0;
-  efRun.disabled = command.disabled || sideBusy || lines.length === 0;
-  efDelete.disabled = command.disabled || sideBusy || efOrigin.size === 0;
+  const { lines, undo, bad, skipped } = editLines();
+  const loaded = efOrigin.size > 0;
+  efPreview.textContent = lines.length > 0 ? lines.join('\n  ') : loaded ? '변경 사항이 없습니다.' : '';
+  efUndo.textContent = undo.join('\n  ');
+  efUndo.hidden = undo.length === 0;
+  efUndoHead.hidden = undo.length === 0;
+  efInsert.disabled = command.disabled || lines.length === 0 || bad.length > 0;
+  efRun.disabled = command.disabled || sideBusy || lines.length === 0 || bad.length > 0;
+  efDelete.disabled = command.disabled || sideBusy || !loaded;
+  const at = efStates.indexOf(efState.value);
+  const next = at >= 0 ? efStates[at + 1] : undefined;
+  const prev = at > 0 ? efStates[at - 1] : undefined;
+  efPromote.disabled = command.disabled || sideBusy || !loaded || (at >= 0 && !next);
+  efDemote.disabled = command.disabled || sideBusy || !loaded || (at >= 0 && !prev);
+  efPromote.title = next ? `promote bus → ${next}` : 'promote bus';
+  efDemote.title = prev ? `demote bus → ${prev}` : 'demote bus';
+  for (const control of cfControls(editView)) {
+    const key = controlKey(control);
+    const changed = loaded && efOrigin.has(key) && control.value !== efOrigin.get(key);
+    control.classList.toggle('changed', changed);
+    for (const label of control.labels ?? []) label.classList.toggle('changed', changed);
+  }
+  renderWarnings(efWarn, [
+    quoteWarning(bad),
+    skipped.length > 0 && `따옴표 때문에 되돌리는 문장에서 뺀 항목: ${[...new Set(skipped)].join(', ')}`,
+  ].filter(Boolean));
 }
 
-function sendEdit(text, confirm) {
-  efReload = text;
+function sendEdit(text, confirm, undo = '', label = UNDO_LABEL) {
+  efReload = { text, undo, label };
   vscode.postMessage({ type: 'send', text, confirm });
 }
 
-function reloadEditAfter(stored) {
-  if (!efReload || !sameCommand(stored.command, efReload)) return;
-  const removed = /^delete\b/i.test(efReload);
-  efReload = '';
+function reloadEditAfter(stored, id) {
+  if (!efReload || !sameCommand(stored.command, efReload.text)) return;
+  const { text, undo, label } = efReload;
+  efReload = null;
   if (hasErrorLine(cleanResult(stored.result))) return;
-  if (!removed) {
-    void loadEdit(efLoaded);
+  if (undo) {
+    undoHints.set(id, { text: undo, label });
+    const item = blockById(id);
+    if (item) undoHint(item);
+  }
+  if (/^delete\b/i.test(text)) {
+    renderEdit(null);
+    setEditNote('객체를 삭제했습니다.');
     return;
   }
-  renderEdit(null);
-  setEditNote('객체를 삭제했습니다.');
+  void loadEdit(efLoaded);
 }
 
 let stageGrow = '';
@@ -2875,15 +3413,17 @@ window.addEventListener('message', (event) => {
   }
   if (message.type === 'block') {
     runningId = message.id;
-    for (const hint of history.querySelectorAll('.block-hint')) {
+    for (const hint of history.querySelectorAll('.block-hint:not(.block-undo)')) {
       if (sameCommand(hint.dataset.cmd, message.command)) hint.remove();
     }
+    if (/\bproperty\b/i.test(message.command)) forgetSymbolics();
     history.append(blockNode(message));
-    addRecall(message.id, message.command);
+    if (!message.secret) addRecall(message.id, message.command);
+    mapRow(message);
     updateTxFromCommand(message.command, false);
     syncStatus();
     if (findQuery) syncFind(false);
-    follow();
+    follow(true);
     return;
   }
   if (message.type === 'chunk') {
@@ -2896,14 +3436,20 @@ window.addEventListener('message', (event) => {
   if (message.type === 'blockDone') {
     flushPaint();
     settleBlock(message.id);
-    const stored = blockText.get(String(message.id));
+    const id = String(message.id);
+    const stored = blockText.get(id);
+    if (stored) stored.elapsed = message.elapsed;
     if (stored && hasErrorLine(cleanResult(stored.result))) recomputeAllTx();
-    const item = blockById(String(message.id));
+    const item = blockById(id);
     if (item) {
+      item.querySelector('.block-time').textContent = formatElapsed(message.elapsed);
       symbolicHint(item);
       syncGridButton(item);
     }
-    if (stored) reloadEditAfter(stored);
+    if (stored) {
+      settleRow(id, stored);
+      reloadEditAfter(stored, id);
+    }
     return;
   }
   if (message.type === 'reset') {
@@ -2911,7 +3457,12 @@ window.addEventListener('message', (event) => {
     if (stored) stored.reset = true;
     const item = blockById(String(message.id));
     if (item && !item.querySelector('.block-reset')) item.querySelector('.block-wait').after(resetNode());
+    failRow(String(message.id));
     recomputeAllTx();
+    return;
+  }
+  if (message.type === 'batchEnd') {
+    endBatch(message.batch);
     return;
   }
   if (message.type === 'cleared') {
@@ -2926,6 +3477,22 @@ window.addEventListener('message', (event) => {
   }
   if (message.type === 'input') {
     setInputEnabled(message.enabled);
+    return;
+  }
+  if (message.type === 'context') {
+    setContext(message.text);
+    return;
+  }
+  if (message.type === 'graph') {
+    graphAvailable = message.available === true;
+    return;
+  }
+  if (message.type === 'config') {
+    setContextCommand(message.contextCommand);
+    return;
+  }
+  if (message.type === 'resetView') {
+    resetView();
     return;
   }
   if (message.type === 'clearEnabled') setClearEnabled(message.enabled);
@@ -2968,9 +3535,19 @@ history.addEventListener('wheel', () => {
   closePick();
 });
 
+history.addEventListener('scroll', () => {
+  stick = history.scrollHeight - history.scrollTop - history.clientHeight < 24;
+});
+
 history.addEventListener('click', (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
+  const oid = target.closest('.oid');
+  if (oid && !window.getSelection()?.toString()) {
+    pickText = oid.textContent ?? '';
+    openPick(event.clientX, event.clientY, true);
+    return;
+  }
   const fold = target.closest('.fold');
   if (fold) {
     const block = fold.closest('.block');
@@ -2986,12 +3563,14 @@ history.addEventListener('click', (event) => {
   }
   const copyBtn = target.closest('.block-copy');
   if (copyBtn) {
-    const block = copyBtn.closest('.block');
-    const stored = block ? blockText.get(block.dataset.id) : null;
-    if (!stored) return;
-    const grid = block.classList.contains('grid') ? gridOf(stored) : null;
-    const text = grid ? gridTsv(grid) : cleanResult(stored.result) || stored.command;
+    const text = blockContent(copyBtn.closest('.block'));
     if (text) vscode.postMessage({ type: 'copy', text });
+    return;
+  }
+  const openBtn = target.closest('.block-open');
+  if (openBtn) {
+    const text = blockContent(openBtn.closest('.block'));
+    if (text) vscode.postMessage({ type: 'openDocument', content: text });
     return;
   }
   if (target.closest('.block-stop')) {
@@ -3004,6 +3583,11 @@ history.addEventListener('click', (event) => {
     const block = rerunBtn.closest('.block');
     const stored = block ? blockText.get(block.dataset.id) : null;
     if (stored?.command) vscode.postMessage({ type: 'send', text: stored.command });
+    return;
+  }
+  const undoBtn = target.closest('.block-undo button');
+  if (undoBtn) {
+    if (!command.disabled) insertStatement(undoBtn.closest('.block-undo').dataset.undo);
     return;
   }
   const hintBtn = target.closest('.block-hint button');
@@ -3325,6 +3909,7 @@ function matchPhrases(raw, force = false) {
         for (const name of cached) {
           if (!partial || name.toLowerCase().includes(partial)) {
             const quoted = formatSchemaName(name);
+            if (!quoted) continue;
             const suffix = kind === 'table' && verb.toLowerCase() === 'print' ? ' system' : '';
             const candidate = `${verb} ${kind} ${quoted}${suffix}`;
             if (candidate.toLowerCase() !== key) {
@@ -3644,6 +4229,12 @@ command.addEventListener('keydown', (event) => {
     openAssist(true);
     return;
   }
+  if (isHistoryKey(event)) {
+    event.preventDefault();
+    closeAssist();
+    stepHistory(event.key === 'ArrowUp' ? 1 : -1);
+    return;
+  }
   if (!assist.hidden) {
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -3685,6 +4276,7 @@ command.addEventListener('beforeinput', (event) => {
 });
 
 command.addEventListener('input', () => {
+  historyAt = -1;
   syncCommandClear();
   savePrefs();
   if (assist.hidden) return;
@@ -3740,6 +4332,10 @@ pick.addEventListener('mousedown', (event) => {
   }
   if (act === 'editBus' && isObjectId(text)) {
     openEdit(text);
+    return;
+  }
+  if (act === 'graphBus' && isObjectId(text)) {
+    vscode.postMessage({ type: 'openGraph', id: text });
     return;
   }
   insertAtCaret(raw);
@@ -3882,7 +4478,7 @@ document.getElementById('snippets').addEventListener('click', (event) => {
   const button = target.closest('button');
   if (!button || button.disabled) return;
   const kind = button.dataset.insert;
-  if (kind === 'context') insertStatement('set context user creator;');
+  if (kind === 'context') insertStatement(contextCommand);
   else if (kind === 'verb') insertStatement('verb on;');
   else if (kind === 'temp') insertStatement('temp query bus * * *');
   else if (kind === 'print') insertStatement('print bus * * *');
@@ -3941,15 +4537,32 @@ efOid.addEventListener('keydown', (event) => {
 });
 
 efInsert.addEventListener('click', () => {
-  if (!efInsert.disabled) insertStatement(editLines().join('\n  '));
+  if (!efInsert.disabled) insertStatement(editLines().lines.join('\n  '));
 });
 
 efRun.addEventListener('click', () => {
-  if (!efRun.disabled) sendEdit(editLines().join(' '), true);
+  if (efRun.disabled) return;
+  const { lines, undo } = editLines();
+  sendEdit(lines.join(' '), true, undo.join(' '));
 });
 
 efDelete.addEventListener('click', () => {
-  if (!efDelete.disabled) sendEdit(`delete bus ${efLoaded};`, false);
+  if (efDelete.disabled) return;
+  const { text, skipped } = recreateText();
+  const label = skipped.length > 0 ? `${RECREATE_LABEL} · 따옴표 때문에 뺀 항목: ${[...new Set(skipped)].join(', ')}` : RECREATE_LABEL;
+  sendEdit(`delete bus ${efLoaded};`, false, text, label);
+});
+
+efPromote.addEventListener('click', () => {
+  if (!efPromote.disabled) sendEdit(`promote bus ${efLoaded};`, true, `demote bus ${efLoaded};`);
+});
+
+efDemote.addEventListener('click', () => {
+  if (!efDemote.disabled) sendEdit(`demote bus ${efLoaded};`, true, `promote bus ${efLoaded};`);
+});
+
+efUndoCopy.addEventListener('click', () => {
+  if (efUndo.textContent) vscode.postMessage({ type: 'copy', text: efUndo.textContent });
 });
 
 function isListed(list, value) {
@@ -3957,10 +4570,14 @@ function isListed(list, value) {
 }
 
 createView.addEventListener('input', (event) => {
-  if (event.target === cfPolicy) cfPolicyAuto = false;
+  const target = event.target;
+  if (target === cfPolicy) cfPolicyAuto = false;
+  const row = target instanceof Element ? target.closest('#cf-rows tbody tr') : null;
+  if (row && row.dataset.status !== 'run') delete row.dataset.status;
   syncCreate();
-  if (event.target === cfType && isListed(cfTypes, cfType.value.trim())) void loadType();
-  if (event.target === cfPolicy && isListed(cfPolicies, cfPolicy.value.trim())) void loadPolicy();
+  if (target === cfType && isListed(cfTypes, cfType.value.trim())) void loadType();
+  if (target === cfPolicy && isListed(cfPolicies, cfPolicy.value.trim())) void loadPolicy();
+  if (target === cfType || target.id === 'cf-name' || target.id === 'cf-rev') scheduleDuplicate();
 });
 
 cfType.addEventListener('change', () => {
@@ -3977,7 +4594,12 @@ cfInsert.addEventListener('click', () => {
 
 cfRun.addEventListener('click', () => {
   if (cfRun.disabled) return;
-  for (const lines of createStatements()) vscode.postMessage({ type: 'send', text: lines.join(' ') });
+  if (isGridMode()) {
+    runBatch();
+    return;
+  }
+  const [statement] = createStatements();
+  if (statement) vscode.postMessage({ type: 'send', text: statement.lines.join(' ') });
 });
 
 cfModeOne.addEventListener('click', () => {
@@ -4096,7 +4718,12 @@ function resetView() {
   }
   applyRecallFilter();
   syncRecallClear();
-  efReload = '';
+  efReload = null;
+  undoHints.clear();
+  forgetSymbolics();
+  resetBatches();
+  historyAt = -1;
+  setContext('');
   helpFind.value = '';
   helpQuery = '';
   paintHelp(true, false);
@@ -4114,12 +4741,12 @@ function resetView() {
   queuedSide = null;
   syncTx();
   syncFind(false);
+  syncCreate();
   savePrefs();
-  vscode.postMessage({ type: 'restart' });
 }
 
 restartButton.addEventListener('click', () => {
-  resetView();
+  vscode.postMessage({ type: 'restart' });
 });
 
 syncHistory();
