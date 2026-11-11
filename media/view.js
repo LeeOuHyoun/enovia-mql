@@ -2697,6 +2697,7 @@ function fillDatalist(list, names) {
 
 const COMBO_MAX = 100;
 const COMBO_MAX_HEIGHT = 200;
+const SELECT_OPEN_KEYS = new Set([' ', 'Enter', 'F4']);
 let comboInput = null;
 let comboQuery = '';
 let comboItems = [];
@@ -2704,6 +2705,10 @@ let comboIndex = -1;
 
 function isComboInput(target) {
   return target instanceof HTMLInputElement && !!target.dataset.list;
+}
+
+function isComboTarget(target) {
+  return isComboInput(target) || target instanceof HTMLSelectElement;
 }
 
 function placeCombo() {
@@ -2716,24 +2721,35 @@ function placeCombo() {
   combo.style.maxHeight = `${Math.min(COMBO_MAX_HEIGHT, up ? above : below)}px`;
   combo.style.top = up ? '' : `${rect.bottom + 2}px`;
   combo.style.bottom = up ? `${window.innerHeight - rect.top + 2}px` : '';
+  const overflow = combo.getBoundingClientRect().right - window.innerWidth + 4;
+  if (overflow > 0) combo.style.left = `${Math.max(4, rect.left - overflow)}px`;
+}
+
+function comboSource(target) {
+  if (target instanceof HTMLSelectElement) return [...target.options].map((option) => ({ value: option.value, label: option.text }));
+  const list = document.getElementById(target.dataset.list);
+  return list ? [...list.options].map((option) => ({ value: option.value, label: option.value })) : [];
+}
+
+function markCombo() {
+  combo.querySelectorAll('button').forEach((item, index) => item.classList.toggle('on', index === comboIndex));
+  combo.children[comboIndex]?.scrollIntoView({ block: 'nearest' });
 }
 
 function renderCombo() {
-  const list = document.getElementById(comboInput.dataset.list);
-  const names = list ? [...list.options].map((option) => option.value) : [];
+  const items = comboSource(comboInput);
   const keyword = comboQuery.trim().toLowerCase();
-  const found = keyword ? names.filter((name) => name.toLowerCase().includes(keyword)) : names;
-  const head = found.filter((name) => name.toLowerCase().startsWith(keyword));
-  const matches = keyword ? [...head, ...found.filter((name) => !name.toLowerCase().startsWith(keyword))] : found;
+  const found = keyword ? items.filter((item) => item.label.toLowerCase().includes(keyword)) : items;
+  const isHead = (item) => item.label.toLowerCase().startsWith(keyword);
+  const matches = keyword ? [...found.filter(isHead), ...found.filter((item) => !isHead(item))] : found;
   comboItems = matches.slice(0, COMBO_MAX);
-  comboIndex = -1;
   combo.replaceChildren(
-    ...comboItems.map((name, index) => {
+    ...comboItems.map(({ label }, index) => {
       const item = document.createElement('button');
       item.type = 'button';
       item.tabIndex = -1;
-      item.textContent = name;
-      item.title = name;
+      item.textContent = label || ' ';
+      item.title = label;
       item.dataset.index = String(index);
       return item;
     }),
@@ -2745,11 +2761,14 @@ function renderCombo() {
     combo.append(more);
   }
   combo.hidden = comboItems.length === 0;
-  if (!combo.hidden) placeCombo();
+  if (combo.hidden) return;
+  placeCombo();
+  comboIndex = comboInput instanceof HTMLSelectElement ? comboInput.selectedIndex : -1;
+  markCombo();
 }
 
-function openCombo(input, query) {
-  comboInput = input;
+function openCombo(target, query) {
+  comboInput = target;
   comboQuery = query;
   renderCombo();
 }
@@ -2763,16 +2782,20 @@ function moveCombo(step) {
   const count = comboItems.length;
   if (!count) return;
   comboIndex = comboIndex < 0 ? (step > 0 ? 0 : count - 1) : (comboIndex + step + count) % count;
-  combo.querySelectorAll('button').forEach((item, index) => item.classList.toggle('on', index === comboIndex));
-  combo.children[comboIndex].scrollIntoView({ block: 'nearest' });
+  markCombo();
 }
 
-function pickCombo(name) {
-  const input = comboInput;
+function pickCombo(item) {
+  const target = comboInput;
   closeCombo();
-  input.value = name;
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
+  if (target.value === item.value && target instanceof HTMLSelectElement) return;
+  target.value = item.value;
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+  target.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function isComboOpenFor(target) {
+  return !combo.hidden && comboInput === target;
 }
 
 document.addEventListener('focusin', (event) => {
@@ -2784,26 +2807,49 @@ document.addEventListener('focusout', (event) => {
 });
 
 document.addEventListener('mousedown', (event) => {
-  if (isComboInput(event.target) && event.target === document.activeElement && combo.hidden) openCombo(event.target, '');
+  const target = event.target;
+  if (target instanceof HTMLSelectElement) {
+    event.preventDefault();
+    if (target.disabled) return;
+    if (isComboOpenFor(target)) return closeCombo();
+    target.focus();
+    openCombo(target, '');
+    return;
+  }
+  if (isComboInput(target) && target === document.activeElement && combo.hidden) openCombo(target, '');
 });
 
 document.addEventListener('input', (event) => {
   if (isComboInput(event.target) && event.isTrusted) openCombo(event.target, event.target.value);
 });
 
+function handleComboClosedKey(event) {
+  const target = event.target;
+  const isSelect = target instanceof HTMLSelectElement;
+  const opens = isSelect
+    ? SELECT_OPEN_KEYS.has(event.key) || (event.altKey && event.key === 'ArrowDown')
+    : event.key === 'ArrowDown' || event.key === 'ArrowUp';
+  if (!opens) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openCombo(target, '');
+}
+
 document.addEventListener(
   'keydown',
   (event) => {
-    if (!isComboInput(event.target)) return;
+    const target = event.target;
+    if (!isComboTarget(target)) return;
+    if (!isComboOpenFor(target)) return handleComboClosedKey(event);
+    const isPick = event.key === 'Enter' || (event.key === ' ' && target instanceof HTMLSelectElement);
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
-      if (combo.hidden) openCombo(event.target, '');
-      else moveCombo(event.key === 'ArrowDown' ? 1 : -1);
-    } else if (event.key === 'Enter' && !combo.hidden && comboIndex >= 0) {
+      moveCombo(event.key === 'ArrowDown' ? 1 : -1);
+    } else if (isPick && comboIndex >= 0) {
       event.preventDefault();
       event.stopPropagation();
       pickCombo(comboItems[comboIndex]);
-    } else if (event.key === 'Escape' && !combo.hidden) {
+    } else if (event.key === 'Escape' || (isPick && target instanceof HTMLSelectElement)) {
       event.preventDefault();
       event.stopPropagation();
       closeCombo();
