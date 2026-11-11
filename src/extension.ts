@@ -6,7 +6,7 @@ const batchNotice = '배치가 표준 입력을 넘기지 못해 프롬프트가
 const prefsKey = 'enovia-mql.prefs';
 const configKey = 'enovia-mql.contextCommand';
 const graphExtension = 'local.3d-mql';
-const graphCommand = '3d-mql.openGraph';
+const graphCommand = '3d-mql.search';
 const maxRecalls = 200;
 const bootTimeoutMs = 5000;
 const logLimit = 2000;
@@ -398,8 +398,8 @@ class MqlView implements vscode.Disposable {
       void this.openDocument(message.content);
       return;
     }
-    if (message.type === 'openGraph' && typeof message.id === 'string') {
-      void this.openGraph(message.id);
+    if (message.type === 'searchGraph' && isRecord(message.query)) {
+      void this.searchGraph(message.query);
       return;
     }
     if (message.type === 'prefs') {
@@ -437,12 +437,11 @@ class MqlView implements vscode.Disposable {
     await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, preview: false });
   }
 
-  private async openGraph(id: string) {
-    if (!/^\d+(?:\.\d+){3}$/.test(id)) return;
+  private async searchGraph(query: Record<string, unknown>) {
     try {
-      await vscode.commands.executeCommand(graphCommand, id);
+      await vscode.commands.executeCommand(graphCommand, query);
     } catch (error) {
-      void vscode.window.showErrorMessage(`3D MQL 그래프에서 열지 못했습니다. ${error instanceof Error ? error.message : String(error)}`);
+      void vscode.window.showErrorMessage(`3D MQL 그래프에서 검색하지 못했습니다. ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

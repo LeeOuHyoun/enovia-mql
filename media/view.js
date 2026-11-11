@@ -2253,6 +2253,15 @@ function isObjectId(text) {
   return /^\d+(\.\d+){3}$/.test(text.trim());
 }
 
+function graphSearchTerms(text) {
+  const terms = text
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.replace(/;+$/, '').replace(/^['"]+|['"]+$/g, ''))
+    .filter(Boolean);
+  return terms.length >= 1 && terms.length <= 3 ? terms : null;
+}
+
 function formatSchemaName(name) {
   const trimmed = name.trim();
   return trimmed ? mqlQuote(trimmed) ?? '' : '';
@@ -2288,7 +2297,10 @@ function openPick(x, y, inResult = true) {
   const editBtn = pick.querySelector('[data-act="editBus"]');
   editBtn.hidden = !oid;
   editBtn.disabled = command.disabled;
-  pick.querySelector('[data-act="graphBus"]').hidden = !oid || !graphAvailable;
+  const terms = graphSearchTerms(pickText);
+  const graphBtn = pick.querySelector('[data-act="graphSearch"]');
+  graphBtn.hidden = !terms || !graphAvailable;
+  graphBtn.textContent = terms ? `3D MQL에서 검색 (${terms.join(' · ')})` : '3D MQL에서 검색';
   placeFixed(pick, x, y);
 }
 
@@ -3522,6 +3534,12 @@ document.addEventListener('contextmenu', (event) => {
     openPick(event.clientX, event.clientY, true);
     return;
   }
+  const oid = event.target instanceof Element ? event.target.closest('.oid') : null;
+  if (oid && history.contains(oid)) {
+    pickText = oid.textContent ?? '';
+    openPick(event.clientX, event.clientY, true);
+    return;
+  }
   const anyText = selectedText();
   if (anyText) {
     pickText = anyText;
@@ -3544,12 +3562,6 @@ history.addEventListener('scroll', () => {
 history.addEventListener('click', (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
-  const oid = target.closest('.oid');
-  if (oid && !window.getSelection()?.toString()) {
-    pickText = oid.textContent ?? '';
-    openPick(event.clientX, event.clientY, true);
-    return;
-  }
   const fold = target.closest('.fold');
   if (fold) {
     const block = fold.closest('.block');
@@ -4336,8 +4348,9 @@ pick.addEventListener('mousedown', (event) => {
     openEdit(text);
     return;
   }
-  if (act === 'graphBus' && isObjectId(text)) {
-    vscode.postMessage({ type: 'openGraph', id: text });
+  if (act === 'graphSearch') {
+    const [type, name = '', revision = ''] = graphSearchTerms(text) ?? [];
+    if (type) vscode.postMessage({ type: 'searchGraph', query: { type, name, revision } });
     return;
   }
   insertAtCaret(raw);
