@@ -146,17 +146,17 @@
         <div id="create-view">
           <div class="cf-grid">
             <label for="cf-type">Type</label>
-            <input id="cf-type" class="cf-input" list="cf-types" spellcheck="false" autocomplete="off" />
+            <input id="cf-type" class="cf-input" data-list="cf-types" spellcheck="false" autocomplete="off" />
             <label for="cf-name" class="cf-one">Name</label>
             <input id="cf-name" class="cf-input cf-one" data-key="name" spellcheck="false" autocomplete="off" />
             <label for="cf-rev" class="cf-one">Revision</label>
             <input id="cf-rev" class="cf-input cf-one" data-key="rev" spellcheck="false" autocomplete="off" />
             <label for="cf-policy">Policy</label>
-            <input id="cf-policy" class="cf-input" list="cf-policies" spellcheck="false" autocomplete="off" />
+            <input id="cf-policy" class="cf-input" data-list="cf-policies" spellcheck="false" autocomplete="off" />
             <label for="cf-vault">Vault</label>
-            <input id="cf-vault" class="cf-input" list="cf-vaults" spellcheck="false" autocomplete="off" value="eService Production" />
+            <input id="cf-vault" class="cf-input" data-list="cf-vaults" spellcheck="false" autocomplete="off" value="eService Production" />
             <label for="cf-state" class="cf-one">State</label>
-            <input id="cf-state" class="cf-input cf-one" data-key="current" list="cf-states" spellcheck="false" autocomplete="off" placeholder="(기본)" />
+            <input id="cf-state" class="cf-input cf-one" data-key="current" data-list="cf-states" spellcheck="false" autocomplete="off" placeholder="(기본)" />
             <label for="cf-owner" class="cf-one">Owner</label>
             <input id="cf-owner" class="cf-input cf-one" data-key="owner" spellcheck="false" autocomplete="off" />
             <label for="cf-desc" class="cf-one">Description</label>
@@ -280,6 +280,7 @@
     </div>
   </div>
   <div id="assist" role="listbox" hidden></div>
+  <div id="combo" role="listbox" hidden></div>
   <div id="pick" role="menu" hidden>
     <button type="button" role="menuitem" data-act="copy">복사</button>
     <button type="button" role="menuitem" data-act="paste">커서에 붙이기</button>

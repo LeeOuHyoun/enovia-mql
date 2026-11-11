@@ -2108,7 +2108,8 @@ body.line-numbers #command {
   outline-offset: -1px;
 }
 
-#assist {
+#assist,
+#combo {
   position: fixed;
   z-index: 5;
   box-sizing: border-box;
@@ -2135,7 +2136,8 @@ body.line-numbers #command {
   box-shadow: 0 4px 12px color-mix(in srgb, #000 36%, transparent);
 }
 
-#assist button {
+#assist button,
+#combo button {
   display: block;
   width: 100%;
   box-sizing: border-box;
@@ -2163,7 +2165,9 @@ body.line-numbers #command {
 }
 
 #assist button.on,
-#assist button:hover {
+#assist button:hover,
+#combo button.on,
+#combo button:hover {
   background: var(
     --vscode-menu-selectionBackground,
     var(--vscode-list-activeSelectionBackground)
@@ -2172,6 +2176,12 @@ body.line-numbers #command {
     --vscode-menu-selectionForeground,
     var(--vscode-list-activeSelectionForeground)
   );
+}
+
+#combo .combo-more {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 #pick,

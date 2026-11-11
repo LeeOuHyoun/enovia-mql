@@ -70,6 +70,7 @@ const cfTypes = document.getElementById('cf-types');
 const cfPolicies = document.getElementById('cf-policies');
 const cfVaults = document.getElementById('cf-vaults');
 const cfStates = document.getElementById('cf-states');
+const combo = document.getElementById('combo');
 const cfModeOne = document.getElementById('cf-mode-one');
 const cfModeGrid = document.getElementById('cf-mode-grid');
 const cfRows = document.getElementById('cf-rows');
@@ -2691,7 +2692,146 @@ function mqlQuote(value) {
 
 function fillDatalist(list, names) {
   list.replaceChildren(...names.map((name) => new Option(name, name)));
+  if (comboInput?.dataset.list === list.id) renderCombo();
 }
+
+const COMBO_MAX = 100;
+const COMBO_MAX_HEIGHT = 200;
+let comboInput = null;
+let comboQuery = '';
+let comboItems = [];
+let comboIndex = -1;
+
+function isComboInput(target) {
+  return target instanceof HTMLInputElement && !!target.dataset.list;
+}
+
+function placeCombo() {
+  const rect = comboInput.getBoundingClientRect();
+  const below = window.innerHeight - rect.bottom - 8;
+  const above = rect.top - 8;
+  const up = below < COMBO_MAX_HEIGHT && above > below;
+  combo.style.left = `${rect.left}px`;
+  combo.style.width = `${rect.width}px`;
+  combo.style.maxHeight = `${Math.min(COMBO_MAX_HEIGHT, up ? above : below)}px`;
+  combo.style.top = up ? '' : `${rect.bottom + 2}px`;
+  combo.style.bottom = up ? `${window.innerHeight - rect.top + 2}px` : '';
+}
+
+function renderCombo() {
+  const list = document.getElementById(comboInput.dataset.list);
+  const names = list ? [...list.options].map((option) => option.value) : [];
+  const keyword = comboQuery.trim().toLowerCase();
+  const found = keyword ? names.filter((name) => name.toLowerCase().includes(keyword)) : names;
+  const head = found.filter((name) => name.toLowerCase().startsWith(keyword));
+  const matches = keyword ? [...head, ...found.filter((name) => !name.toLowerCase().startsWith(keyword))] : found;
+  comboItems = matches.slice(0, COMBO_MAX);
+  comboIndex = -1;
+  combo.replaceChildren(
+    ...comboItems.map((name, index) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.tabIndex = -1;
+      item.textContent = name;
+      item.title = name;
+      item.dataset.index = String(index);
+      return item;
+    }),
+  );
+  if (matches.length > COMBO_MAX) {
+    const more = document.createElement('div');
+    more.className = 'combo-more';
+    more.textContent = `외 ${matches.length - COMBO_MAX}개 · 더 입력하면 좁혀집니다`;
+    combo.append(more);
+  }
+  combo.hidden = comboItems.length === 0;
+  if (!combo.hidden) placeCombo();
+}
+
+function openCombo(input, query) {
+  comboInput = input;
+  comboQuery = query;
+  renderCombo();
+}
+
+function closeCombo() {
+  combo.hidden = true;
+  comboInput = null;
+}
+
+function moveCombo(step) {
+  const count = comboItems.length;
+  if (!count) return;
+  comboIndex = comboIndex < 0 ? (step > 0 ? 0 : count - 1) : (comboIndex + step + count) % count;
+  combo.querySelectorAll('button').forEach((item, index) => item.classList.toggle('on', index === comboIndex));
+  combo.children[comboIndex].scrollIntoView({ block: 'nearest' });
+}
+
+function pickCombo(name) {
+  const input = comboInput;
+  closeCombo();
+  input.value = name;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+document.addEventListener('focusin', (event) => {
+  if (isComboInput(event.target)) openCombo(event.target, '');
+});
+
+document.addEventListener('focusout', (event) => {
+  if (event.target === comboInput) closeCombo();
+});
+
+document.addEventListener('mousedown', (event) => {
+  if (isComboInput(event.target) && event.target === document.activeElement && combo.hidden) openCombo(event.target, '');
+});
+
+document.addEventListener('input', (event) => {
+  if (isComboInput(event.target) && event.isTrusted) openCombo(event.target, event.target.value);
+});
+
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (!isComboInput(event.target)) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (combo.hidden) openCombo(event.target, '');
+      else moveCombo(event.key === 'ArrowDown' ? 1 : -1);
+    } else if (event.key === 'Enter' && !combo.hidden && comboIndex >= 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      pickCombo(comboItems[comboIndex]);
+    } else if (event.key === 'Escape' && !combo.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeCombo();
+    } else if (event.key === 'Tab') {
+      closeCombo();
+    }
+  },
+  true,
+);
+
+document.addEventListener(
+  'scroll',
+  (event) => {
+    if (comboInput && event.target !== combo) closeCombo();
+  },
+  true,
+);
+
+window.addEventListener('resize', closeCombo);
+
+combo.addEventListener('mousedown', (event) => {
+  event.preventDefault();
+});
+
+combo.addEventListener('click', (event) => {
+  const item = event.target instanceof Element ? event.target.closest('button') : null;
+  if (item) pickCombo(comboItems[Number(item.dataset.index)]);
+});
 
 function setCreateNote(text) {
   cfNote.hidden = text === '';
@@ -2866,7 +3006,7 @@ function fieldControl(key) {
   control.autocomplete = 'off';
   control.dataset.key = key;
   if (key === 'current') {
-    control.setAttribute('list', 'cf-states');
+    control.dataset.list = 'cf-states';
     control.placeholder = '(기본)';
   }
   return control;
