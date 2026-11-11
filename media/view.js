@@ -621,7 +621,8 @@ function cleanResult(raw) {
   return kept.join('\n');
 }
 
-const ERROR_LINE = /^\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/im;
+const PASSWORD_PROMPT = /(?:Enter\s+)?Password\s*:\s*$/i;
+const ERROR_LINE =/^\s*(?:(?:System\s+|MQL\s+|Connect\s+|Syntax\s+|Parse\s+|Database\s+|Severe\s+|Fatal\s+)?Error(?:\s*:|\s+#\d+)|#\d{4,}\s*:)/im;
 
 function hasErrorLine(text) {
   return ERROR_LINE.test(text);
@@ -3446,6 +3447,8 @@ window.addEventListener('message', (event) => {
     if (!stored) return;
     stored.result += message.text;
     queuePaint(message.id);
+    const item = blockById(String(message.id));
+    if (item?.classList.contains('collapsed') && PASSWORD_PROMPT.test(stored.result)) setFolded(item, false);
     return;
   }
   if (message.type === 'blockDone') {
