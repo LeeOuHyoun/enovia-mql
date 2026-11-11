@@ -394,6 +394,10 @@ class MqlView implements vscode.Disposable {
       void vscode.env.clipboard.writeText(message.text);
       return;
     }
+    if (message.type === 'notify' && typeof message.text === 'string') {
+      vscode.window.setStatusBarMessage(`$(warning) ${message.text}`, 3000);
+      return;
+    }
     if (message.type === 'openDocument' && typeof message.content === 'string') {
       void this.openDocument(message.content);
       return;

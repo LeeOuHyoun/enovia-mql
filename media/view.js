@@ -2075,6 +2075,7 @@ function runStatement() {
   const hole = stmt && placeholderSpans(command.value).find((s) => s.start >= stmt.start && s.end <= stmt.end);
   if (hole) {
     selectSpan(hole);
+    vscode.postMessage({ type: 'notify', text: '채우지 않은 <…> 칸이 있어 실행하지 않았습니다.' });
     return;
   }
   ensureStatementSemicolon();
