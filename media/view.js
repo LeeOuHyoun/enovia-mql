@@ -3431,6 +3431,7 @@ window.addEventListener('message', (event) => {
       if (sameCommand(hint.dataset.cmd, message.command)) hint.remove();
     }
     if (/\bproperty\b/i.test(message.command)) forgetSymbolics();
+    if (message.folded) collapsed.add(String(message.id));
     history.append(blockNode(message));
     if (!message.secret) addRecall(message.id, message.command);
     mapRow(message);
@@ -3453,8 +3454,10 @@ window.addEventListener('message', (event) => {
     const id = String(message.id);
     const stored = blockText.get(id);
     if (stored) stored.elapsed = message.elapsed;
-    if (stored && hasErrorLine(cleanResult(stored.result))) recomputeAllTx();
+    const failed = stored && hasErrorLine(cleanResult(stored.result));
+    if (failed) recomputeAllTx();
     const item = blockById(id);
+    if (item && failed && item.classList.contains('collapsed')) setFolded(item, false);
     if (item) {
       item.querySelector('.block-time').textContent = formatElapsed(message.elapsed);
       symbolicHint(item);

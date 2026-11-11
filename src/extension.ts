@@ -73,7 +73,7 @@ type Outbound =
       graph: boolean;
       contextCommand: string;
     }
-  | { type: 'block'; id: number; command: string; secret?: boolean; batch?: number }
+  | { type: 'block'; id: number; command: string; secret?: boolean; batch?: number; folded?: boolean }
   | { type: 'blockDone'; id: number; elapsed: number }
   | { type: 'batchEnd'; batch: number }
   | { type: 'reset'; id: number }
@@ -589,7 +589,7 @@ class MqlView implements vscode.Disposable {
     this.activeStart = Date.now();
     this.blockOpen = true;
     this.holding = true;
-    this.post({ type: 'block', id: block.id, command: block.command, secret: block.secret, batch });
+    this.post({ type: 'block', id: block.id, command: block.command, secret: block.secret, batch, ...(this.booting && { folded: true }) });
     this.postClear();
     if (!this.session.send(command)) {
       this.settleHistoryBlock();

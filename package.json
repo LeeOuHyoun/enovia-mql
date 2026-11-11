@@ -2,7 +2,7 @@
   "name": "enovia-mql",
   "displayName": "ENOVIA MQL",
   "description": "ENOVIA MQL 세션을 편집기 탭에서 사용합니다.",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "publisher": "local",
   "private": true,
   "license": "MIT",
