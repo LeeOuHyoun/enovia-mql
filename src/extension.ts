@@ -9,6 +9,7 @@ const graphExtension = 'local.3d-mql';
 const graphCommand = '3d-mql.search';
 const maxRecalls = 200;
 const bootTimeoutMs = 5000;
+const sideTimeoutMs = 60000;
 const logLimit = 2000;
 const secretPattern = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
 const metaPattern = /^(?:list (?:type|vault)|print (?:type|policy|attribute) (?:'[^';]*'|"[^";]*") select [a-z ]+|print bus \d+(?:\.\d+){3} select [a-z. ]+|temp query bus (?:(?:'[^';]*'|"[^";]*") ){3}select id dump '\|~\|'|list property on program eServiceSchemaVariableMapping\.tcl);$/;
@@ -76,7 +77,7 @@ type Outbound =
   | { type: 'block'; id: number; command: string; secret?: boolean; batch?: number; folded?: boolean }
   | { type: 'blockDone'; id: number; elapsed: number }
   | { type: 'batchEnd'; batch: number }
-  | { type: 'reset'; id: number }
+  | { type: 'reset'; id: number; interrupted: boolean }
   | { type: 'chunk'; id: number; text: string }
   | { type: 'cleared' }
   | { type: 'resetView' }
@@ -90,7 +91,7 @@ type Outbound =
   | { type: 'joinLines' }
   | { type: 'sideStart'; lane: SideLane; token: number }
   | { type: 'sideChunk'; lane: SideLane; token: number; text: string }
-  | { type: 'sideEnd'; lane: SideLane; token: number }
+  | { type: 'sideEnd'; lane: SideLane; token: number; failed?: boolean }
   | { type: 'jpoPicked'; path: string };
 
 export function activate(context: vscode.ExtensionContext) {
@@ -233,6 +234,7 @@ class MqlView implements vscode.Disposable {
   private commandQueue: Queued[] = [];
   private pendingSide: { lane: SideLane; text: string; token: number } | undefined;
   private bootTimer: ReturnType<typeof setTimeout> | undefined;
+  private sideTimer: ReturnType<typeof setTimeout> | undefined;
   private activeId: number | undefined;
   private activeText = '';
   private activeBatch: number | undefined;
@@ -561,7 +563,34 @@ class MqlView implements vscode.Disposable {
     if (!this.session.send(command)) {
       this.pendingSide = { lane, text: raw, token };
       this.recoverSession();
+      return;
     }
+    this.scheduleSideTimeout();
+  }
+
+  private scheduleSideTimeout() {
+    clearTimeout(this.sideTimer);
+    this.sideTimer = setTimeout(() => void this.onSideTimeout(), sideTimeoutMs);
+  }
+
+  private async onSideTimeout() {
+    this.sideTimer = undefined;
+    const token = this.sideToken;
+    this.host.log(`응답 없음 [${this.sideLane}] > ${this.sideText.slice(0, logLimit)}`);
+    if (this.txActive) {
+      const reconnect = '다시 연결';
+      const picked = await vscode.window.showWarningMessage(
+        '조회가 60초 동안 응답하지 않습니다. 세션을 다시 연결할까요?',
+        { modal: true, detail: '세션을 다시 연결하므로 진행 중인 트랜잭션은 롤백됩니다.' },
+        reconnect,
+      );
+      if (this.disposed || !this.sideLane || this.sideToken !== token) return;
+      if (picked !== reconnect) {
+        this.scheduleSideTimeout();
+        return;
+      }
+    }
+    this.recoverSession();
   }
 
   private cancelPendingSide() {
@@ -640,6 +669,7 @@ class MqlView implements vscode.Disposable {
   private onOutput(text: string) {
     if (this.booting) this.scheduleBootTimeout();
     if (this.sideLane) {
+      if (this.sideTimer) this.scheduleSideTimeout();
       if (this.sideOutput.length < logLimit) this.sideOutput += text;
       this.post({ type: 'sideChunk', lane: this.sideLane, token: this.sideToken, text });
       return;
@@ -677,7 +707,7 @@ class MqlView implements vscode.Disposable {
     const side = this.sideLane != null;
     this.holding = false;
     this.activeBatch = undefined;
-    this.finishSide(side);
+    this.finishSide(side, true);
     this.postClear();
     if (batch != null && (failed || !this.commandQueue.some((item) => item.batch === batch))) this.dropBatch(batch);
     if (failed) {
@@ -694,14 +724,14 @@ class MqlView implements vscode.Disposable {
     this.sendBootNext();
   }
 
-  private finishSide(restoreInput: boolean) {
+  private finishSide(restoreInput: boolean, completed = false) {
     const lane = this.sideLane;
     if (!lane) return;
     const token = this.sideToken;
     this.sideLane = undefined;
     this.host.log(`${Date.now() - this.sideStart}ms [${lane}] > ${this.sideText.slice(0, logLimit)}\n${this.sideOutput.slice(0, logLimit)}`);
     this.sideOutput = '';
-    this.post({ type: 'sideEnd', lane, token });
+    this.post({ type: 'sideEnd', lane, token, failed: !completed });
     if (restoreInput) this.post({ type: 'input', enabled: this.inputEnabled });
   }
 
@@ -771,6 +801,8 @@ class MqlView implements vscode.Disposable {
 
   private clearTimers() {
     this.clearBootTimer();
+    clearTimeout(this.sideTimer);
+    this.sideTimer = undefined;
   }
 
   private recoverSession() {
@@ -779,8 +811,9 @@ class MqlView implements vscode.Disposable {
     this.clearTimers();
     const side = this.sideLane != null;
     const batch = this.activeBatch;
+    const interrupted = this.blockOpen;
     this.settleHistoryBlock();
-    this.markReset();
+    this.markReset(interrupted);
     this.activeId = undefined;
     this.activeBatch = undefined;
     if (batch != null) this.dropBatch(batch);
@@ -798,11 +831,11 @@ class MqlView implements vscode.Disposable {
     this.session.start();
   }
 
-  private markReset() {
+  private markReset(interrupted: boolean) {
     const last = this.blocks[this.blocks.length - 1];
     if (!last || last.reset) return;
     last.reset = true;
-    this.post({ type: 'reset', id: last.id });
+    this.post({ type: 'reset', id: last.id, interrupted });
   }
 
   private sendBootNext() {

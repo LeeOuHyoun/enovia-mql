@@ -2598,7 +2598,7 @@ function onSideChunk(message) {
 
 function onSideEnd(message) {
   if (message.token !== activeToken) return;
-  const started = sideStarted;
+  const started = sideStarted && !message.failed;
   const lane = pendingLane;
   const superseded = queuedSide !== null;
   sideBusy = false;
@@ -2886,6 +2886,7 @@ function setCreateNote(text) {
 }
 
 async function loadCreateLists(force) {
+  const failed = [];
   for (const [kind, list] of [['type', cfTypes], ['vault', cfVaults]]) {
     if (!force && list.children.length > 0) continue;
     let names = force ? null : schemaCache.get(kind);
@@ -2894,17 +2895,16 @@ async function loadCreateLists(force) {
       const raw = await requestMeta(`list ${kind}`);
       names = raw == null ? null : cleanResult(raw).split('\n').map((line) => line.trim()).filter((line) => line && !hasErrorLine(line));
       if (names) schemaCache.set(kind, names);
+      else failed.push(kind);
     }
     fillDatalist(list, names || []);
   }
-  if (force) {
-    attrMeta.clear();
-    cfTypeLoaded = '';
-    cfPolicyLoaded = '';
-    await loadType();
-    return;
-  }
-  setCreateNote('');
+  setCreateNote(failed.length > 0 ? `${failed.join(' · ')} 목록을 불러오지 못했습니다. 조회를 누르면 다시 불러옵니다.` : '');
+  if (!force) return;
+  attrMeta.clear();
+  cfTypeLoaded = '';
+  cfPolicyLoaded = '';
+  await loadType();
 }
 
 async function loadType() {
@@ -3664,7 +3664,7 @@ window.addEventListener('message', (event) => {
     if (stored) stored.reset = true;
     const item = blockById(String(message.id));
     if (item && !item.querySelector('.block-reset')) item.querySelector('.block-wait').after(resetNode());
-    failRow(String(message.id));
+    if (message.interrupted) failRow(String(message.id));
     recomputeAllTx();
     return;
   }
