@@ -1196,6 +1196,7 @@ function savePrefs() {
       drawerWidth,
       composerHidden: document.body.classList.contains('composer-hidden'),
       historyHidden: document.body.classList.contains('history-hidden'),
+      lineNumbers: document.body.classList.contains('line-numbers'),
       drawerLane: open ? drawerLane : '',
       helpTopic: helpTopic.value,
       listKind: listKind.value,
@@ -1214,6 +1215,7 @@ function hydratePrefs(prefs) {
   if (typeof prefs.drawerWidth === 'number') setDrawerWidth(prefs.drawerWidth);
   if (typeof prefs.splitRatio === 'number') applySplit(prefs.splitRatio);
   if (prefs.composerHidden) setComposerHidden(true);
+  if (prefs.lineNumbers) setLineNumbers(true);
   if (prefs.historyHidden) {
     document.body.classList.add('history-hidden');
     syncHistory();
@@ -4421,6 +4423,7 @@ composerMenu.addEventListener('mousedown', (event) => {
   const target = event.target;
   if (!(target instanceof Element) || !target.closest('#line-numbers')) return;
   setLineNumbers(!document.body.classList.contains('line-numbers'));
+  savePrefs();
   closeComposerMenu();
   if (!command.disabled && !document.body.classList.contains('composer-hidden')) command.focus();
 });

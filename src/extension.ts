@@ -44,6 +44,7 @@ type SavedPrefs = {
   drawerWidth: number;
   composerHidden: boolean;
   historyHidden: boolean;
+  lineNumbers: boolean;
   drawerLane: '' | 'help' | 'list' | 'create' | 'edit';
   helpTopic: string;
   listKind: string;
@@ -992,6 +993,7 @@ function defaultPrefs(): SavedPrefs {
     drawerWidth: 300,
     composerHidden: false,
     historyHidden: false,
+    lineNumbers: false,
     drawerLane: '',
     helpTopic: '',
     listKind: 'type',
@@ -1051,6 +1053,7 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
     drawerWidth,
     composerHidden: typeof value.composerHidden === 'boolean' ? value.composerHidden : base.composerHidden,
     historyHidden: typeof value.historyHidden === 'boolean' ? value.historyHidden : base.historyHidden,
+    lineNumbers: typeof value.lineNumbers === 'boolean' ? value.lineNumbers : base.lineNumbers,
     drawerLane,
     helpTopic,
     listKind,
