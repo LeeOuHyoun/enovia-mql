@@ -28,6 +28,7 @@ declare module 'node:child_process' {
     readonly stderr: Readable | null;
     on(event: 'error', listener: (error: Error) => void): void;
     on(event: 'exit', listener: (code: number | null) => void): void;
+    on(event: 'close', listener: (code: number | null) => void): void;
     kill(): boolean;
   }
 

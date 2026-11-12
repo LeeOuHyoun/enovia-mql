@@ -181,7 +181,7 @@ export class MqlSession {
     this.startedAt = Date.now();
     this.scheduleOpen();
     proc.on("error", () => this.fail(generation));
-    proc.on("exit", () => this.onExit(generation));
+    proc.on("close", () => this.onExit(generation));
     proc.stdout?.on("data", (chunk: Uint8Array) =>
       this.onChunk(generation, chunk, "out"),
     );

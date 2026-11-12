@@ -41,6 +41,7 @@ type SavedPrefs = {
   jpoPath: string;
   drafts: Record<string, string>;
   splitRatio: number;
+  splitAuto: boolean;
   recallWidth: number;
   drawerWidth: number;
   composerHidden: boolean;
@@ -718,9 +719,13 @@ class MqlView implements vscode.Disposable {
   }
 
   private restoreContext() {
+    if (!this.lastContextCommand) {
+      this.flushPending();
+      return;
+    }
     this.booting = true;
     this.recovering = true;
-    this.bootQueue = [this.lastContextCommand || configuredContext()].filter(Boolean);
+    this.bootQueue = [this.lastContextCommand];
     this.sendBootNext();
   }
 
@@ -1025,6 +1030,7 @@ function defaultPrefs(): SavedPrefs {
     jpoPath: '',
     drafts: {},
     splitRatio: 0.6,
+    splitAuto: true,
     recallWidth: 200,
     drawerWidth: 300,
     composerHidden: false,
@@ -1085,6 +1091,7 @@ function parsePrefs(value: unknown, base = defaultPrefs()): SavedPrefs {
     jpoPath: typeof value.jpoPath === 'string' ? value.jpoPath : base.jpoPath,
     drafts: parseDrafts(value.drafts, base.drafts),
     splitRatio,
+    splitAuto: typeof value.splitAuto === 'boolean' ? value.splitAuto : base.splitAuto,
     recallWidth,
     drawerWidth,
     composerHidden: typeof value.composerHidden === 'boolean' ? value.composerHidden : base.composerHidden,

@@ -198,6 +198,7 @@ const DDL_TEMPLATES = new Map([
   ['connect bus', "connect bus <from_id> relationship '<relationship>' to <to_id>;"],
 ]);
 const PLACEHOLDER = /<[A-Za-z_][\w|,.]*>/g;
+const TEMPLATE_HOLES = new Set([...DDL_TEMPLATES.values()].flatMap((text) => text.match(PLACEHOLDER)));
 const OID = /\b\d+\.\d+\.\d+\.\d+\b/g;
 const SECRET = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
 const DEFAULT_CONTEXT = 'set context user creator;';
@@ -247,7 +248,10 @@ let pendingLane = '';
 let runningId = null;
 let rowMenuText = '';
 let hydrated = false;
+const AUTO_MIN_LINES = 6;
+const AUTO_MAX_RATIO = 0.5;
 let splitRatio = 0.6;
+let splitAuto = true;
 let recallWidth = 200;
 let drawerWidth = 300;
 let graphAvailable = false;
@@ -289,6 +293,7 @@ function syncCommandClear() {
   commandClear.disabled = command.disabled || command.value === '';
   placeCommandClear();
   syncGutter();
+  syncComposerHeight();
 }
 
 const commandUndo = [];
@@ -904,12 +909,12 @@ function blockNode(block) {
   openBtn.title = '편집기로 열기';
   openBtn.setAttribute('aria-label', '편집기로 열기');
   openBtn.append(recallIcon('M3 2h6.5L13 5.5V14H3V2zm1 1v10h8V6H9V3H4z'));
-  actions.append(gridBtn, openBtn, copyBtn);
+  actions.append(openBtn, copyBtn);
   if (!block.secret) actions.append(rerunBtn);
   actions.append(stopBtn);
   const result = document.createElement('pre');
   result.className = 'result';
-  head.append(fold, button, time, actions);
+  head.append(fold, button, time, gridBtn, actions);
   item.append(head, result, waitNode());
   if (block.reset) item.append(resetNode());
   paintResult(result, resultRaw);
@@ -941,7 +946,7 @@ function selectNames(cmd) {
 
 function dumpGrid(cmd, lines, sep) {
   const rows = lines.map((line) => line.split(sep));
-  const width = Math.max(...rows.map((row) => row.length));
+  const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
   if (width < 2) return null;
   const names = selectNames(cmd);
   const lead = width - names.length;
@@ -1194,6 +1199,7 @@ function savePrefs() {
       jpoPath: jpoPath.value,
       commandText: hasSecret(command.value) ? '' : command.value,
       splitRatio,
+      splitAuto,
       recallWidth,
       drawerWidth,
       composerHidden: document.body.classList.contains('composer-hidden'),
@@ -1215,7 +1221,9 @@ function hydratePrefs(prefs) {
   syncCommandClear();
   if (typeof prefs.recallWidth === 'number') setRecallWidth(prefs.recallWidth);
   if (typeof prefs.drawerWidth === 'number') setDrawerWidth(prefs.drawerWidth);
-  if (typeof prefs.splitRatio === 'number') applySplit(prefs.splitRatio);
+  if (typeof prefs.splitRatio === 'number') splitRatio = prefs.splitRatio;
+  splitAuto = prefs.splitAuto !== false;
+  layoutComposer();
   if (prefs.composerHidden) setComposerHidden(true);
   if (prefs.lineNumbers) setLineNumbers(true);
   if (prefs.historyHidden) {
@@ -2048,7 +2056,27 @@ function statementAtCursor() {
 }
 
 function placeholderSpans(text) {
-  return [...text.matchAll(PLACEHOLDER)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+  return [...text.matchAll(PLACEHOLDER)]
+    .filter((m) => TEMPLATE_HOLES.has(m[0]))
+    .map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
+function openQuoteAt(text, span) {
+  let quote = '';
+  let at = -1;
+  for (let i = span.start; i < span.end; i += 1) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') i += 1;
+      else if (c === quote) quote = '';
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      at = i;
+    }
+  }
+  return quote ? { start: at, end: at + 1 } : null;
 }
 
 function selectSpan(span) {
@@ -2076,6 +2104,12 @@ function runStatement() {
   if (hole) {
     selectSpan(hole);
     vscode.postMessage({ type: 'notify', text: '채우지 않은 <…> 칸이 있어 실행하지 않았습니다.' });
+    return;
+  }
+  const stray = stmt && openQuoteAt(command.value, stmt);
+  if (stray) {
+    selectSpan(stray);
+    vscode.postMessage({ type: 'notify', text: '따옴표 짝이 맞지 않아 실행하지 않았습니다. 그대로 보내면 뒤 명령까지 문자열로 묶여 세션이 멈춥니다.' });
     return;
   }
   ensureStatementSemicolon();
@@ -3581,6 +3615,7 @@ function setComposerHidden(hidden) {
     stage.style.flexGrow = '1';
   } else if (!hidden && wasHidden) {
     stage.style.flexGrow = stageGrow;
+    layoutComposer();
   }
   const label = hidden ? '입력 표시' : '입력 숨기기';
   composerToggle.title = label;
@@ -3593,16 +3628,40 @@ function setComposerHidden(hidden) {
   savePrefs();
 }
 
-function applySplit(ratio) {
+function availableHeight() {
   const top = clearBar.getBoundingClientRect().bottom;
-  const available = document.body.clientHeight - (top - document.body.getBoundingClientRect().top) - split.offsetHeight;
+  return document.body.clientHeight - (top - document.body.getBoundingClientRect().top) - split.offsetHeight;
+}
+
+function applySplit(ratio) {
+  const available = availableHeight();
   const min = 72;
   const minRatio = available > min * 2 ? min / available : 0.4;
   const maxRatio = available > min * 2 ? (available - min) / available : 0.6;
   const next = available > min * 2 ? Math.min(maxRatio, Math.max(minRatio, ratio)) : Math.min(0.85, Math.max(0.15, ratio));
   splitRatio = next;
-  stage.style.flexGrow = String(next);
-  composer.style.flexGrow = String(1 - next);
+  stage.style.flex = `${next} 1 0`;
+  composer.style.flex = `${1 - next} 1 0`;
+}
+
+function syncComposerHeight() {
+  if (!splitAuto || document.body.classList.contains('composer-hidden')) return;
+  const style = getComputedStyle(command);
+  const floor = (parseFloat(style.lineHeight) || 19) * AUTO_MIN_LINES + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+  const scrollTop = command.scrollTop;
+  command.style.height = '0px';
+  const content = command.scrollHeight;
+  command.style.height = '';
+  command.scrollTop = scrollTop;
+  const height = Math.max(floor, Math.min(content, availableHeight() * AUTO_MAX_RATIO));
+  stage.style.flex = '1 1 0';
+  composer.style.flex = `0 0 ${Math.ceil(height)}px`;
+  follow();
+}
+
+function layoutComposer() {
+  if (splitAuto) syncComposerHeight();
+  else applySplit(splitRatio);
 }
 
 window.addEventListener('message', (event) => {
@@ -4696,17 +4755,29 @@ document.getElementById('snippets').addEventListener('click', (event) => {
   else if (kind === 'where') appendClause('where "attribute[???] == \'???\'"', '???');
 });
 
+function isSplitHandle(event) {
+  if (document.body.classList.contains('composer-hidden') || !(event.target instanceof Element)) return false;
+  return !event.target.closest('#run, #composerToggle, #composerGear, #snippets, #jpo');
+}
+
+split.addEventListener('dblclick', (event) => {
+  if (!isSplitHandle(event)) return;
+  splitAuto = true;
+  syncComposerHeight();
+  savePrefs();
+});
+
 split.addEventListener('mousedown', (event) => {
-  if (document.body.classList.contains('composer-hidden')) return;
-  if (!(event.target instanceof Element) || event.target.closest('#run') || event.target.closest('#composerToggle') || event.target.closest('#composerGear') || event.target.closest('#snippets') || event.target.closest('#jpo')) return;
+  if (!isSplitHandle(event)) return;
   closeComposerMenu();
   event.preventDefault();
   const previous = document.body.style.userSelect;
   document.body.style.userSelect = 'none';
   const move = (ev) => {
     const top = clearBar.getBoundingClientRect().bottom;
-    const available = document.body.clientHeight - (top - document.body.getBoundingClientRect().top) - split.offsetHeight;
+    const available = availableHeight();
     if (available <= 0) return;
+    splitAuto = false;
     applySplit((ev.clientY - top) / available);
   };
   const up = () => {
@@ -4966,4 +5037,7 @@ syncCreate();
 new ResizeObserver(() => {
   syncGutter();
 }).observe(command);
+new ResizeObserver(() => {
+  syncComposerHeight();
+}).observe(document.body);
 vscode.postMessage({ type: 'ready' });
