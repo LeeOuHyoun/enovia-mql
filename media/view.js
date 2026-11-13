@@ -101,6 +101,7 @@ const ctxNode = document.getElementById('ctx');
 const contextSnippet = document.querySelector('#snippets [data-insert="context"]');
 const collapsed = new Set();
 const gridOn = new Set();
+const gridChosen = new Set();
 const blockText = new Map();
 const undoHints = new Map();
 const FIND_WORD_SEPARATORS = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
@@ -800,6 +801,7 @@ function pruneBlockState() {
   for (const id of blockText.keys()) if (!ids.has(id)) blockText.delete(id);
   for (const id of collapsed) if (!ids.has(id)) collapsed.delete(id);
   for (const id of gridOn) if (!ids.has(id)) gridOn.delete(id);
+  for (const id of gridChosen) if (!ids.has(id)) gridChosen.delete(id);
   for (const id of undoHints.keys()) if (!ids.has(id)) undoHints.delete(id);
 }
 
@@ -1160,7 +1162,7 @@ function setGrid(block, on) {
 
 function autoGrid(item) {
   const stored = blockText.get(item.dataset.id);
-  if (!stored || !dumpSeparator(stored.command)) return;
+  if (!stored || gridChosen.has(item.dataset.id) || !dumpSeparator(stored.command)) return;
   const grid = gridOf(stored);
   if (grid && grid.rows.length <= GRID_AUTO_ROWS) setGrid(item, true);
 }
@@ -1278,6 +1280,7 @@ function render(state) {
   for (const item of history.querySelectorAll('.block:not(.pending)')) {
     symbolicHint(item);
     undoHint(item);
+    autoGrid(item);
   }
   ensureRecall(state.blocks);
   markRecall();
@@ -3937,7 +3940,9 @@ history.addEventListener('click', (event) => {
   const gridBtn = target.closest('.block-grid');
   if (gridBtn) {
     const block = gridBtn.closest('.block');
-    if (block) setGrid(block, !block.classList.contains('grid'));
+    if (!block) return;
+    gridChosen.add(block.dataset.id);
+    setGrid(block, !block.classList.contains('grid'));
     return;
   }
   const copyBtn = target.closest('.block-copy');
