@@ -17,6 +17,7 @@ const savedResultLimit = 100000;
 const savedTotalLimit = 2000000;
 const trimmedNote = '\n… (저장 용량 때문에 결과 앞부분만 복원했습니다)';
 const secretPattern = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
+const contextStatementPattern = /(?:^|;)\s*(?:set|push|pop)\s+context\b/i;
 const metaPattern = /^(?:list (?:type|vault)|print (?:type|policy|attribute) (?:'[^';]*'|"[^";]*") select [a-z ]+|print bus \d+(?:\.\d+){3} select [a-z. ]+|temp query bus (?:(?:'[^';]*'|"[^";]*") ){3}select id dump '\|~\|'|list property on program eServiceSchemaVariableMapping\.tcl);$/;
 
 type Block = {
@@ -748,7 +749,7 @@ class MqlView implements vscode.Disposable {
     this.finishSide(side, true);
     this.postClear();
     if (batch != null && (failed || !this.commandQueue.some((item) => item.batch === batch))) this.dropBatch(batch);
-    if (failed) {
+    if (failed && contextStatementPattern.test(this.activeText)) {
       this.restoreContext();
       return;
     }

@@ -164,7 +164,7 @@ export class MqlSession {
   private launch(generation: number) {
     let proc: ChildProcess;
     try {
-      proc = spawn("mql", [], {
+      proc = spawn("mql -k", [], {
         shell: true,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
