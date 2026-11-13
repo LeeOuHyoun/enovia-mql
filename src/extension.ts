@@ -11,6 +11,11 @@ const maxRecalls = 200;
 const bootTimeoutMs = 5000;
 const sideTimeoutMs = 60000;
 const logLimit = 2000;
+const blocksKey = 'enovia-mql.blocks';
+const savedBlockLimit = 50;
+const savedResultLimit = 100000;
+const savedTotalLimit = 2000000;
+const trimmedNote = '\n… (저장 용량 때문에 결과 앞부분만 복원했습니다)';
 const secretPattern = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
 const metaPattern = /^(?:list (?:type|vault)|print (?:type|policy|attribute) (?:'[^';]*'|"[^";]*") select [a-z ]+|print bus \d+(?:\.\d+){3} select [a-z. ]+|temp query bus (?:(?:'[^';]*'|"[^";]*") ){3}select id dump '\|~\|'|list property on program eServiceSchemaVariableMapping\.tcl);$/;
 
@@ -21,6 +26,7 @@ type Block = {
   reset?: boolean;
   elapsed?: number;
   secret?: boolean;
+  boot?: boolean;
 };
 
 type Queued = {
@@ -54,9 +60,13 @@ type SavedPrefs = {
 
 type ViewPrefs = Omit<SavedPrefs, 'drafts'> & { commandText: string };
 
+type SavedBlock = Pick<Block, 'command' | 'result' | 'elapsed'>;
+
 type ViewHost = {
   prefs: () => ViewPrefs;
   save: (raw: unknown) => void;
+  blocks: () => Block[];
+  saveBlocks: (blocks: Block[]) => void;
   hydrate: () => void;
   closed: () => void;
   log: (text: string) => void;
@@ -163,6 +173,8 @@ class MqlHost implements vscode.Disposable {
     const view = new MqlView(this.extensionUri, slot, {
       prefs: () => this.viewPrefs(slot),
       save: (raw) => this.savePrefs(slot, raw),
+      blocks: () => loadBlocks(this.state.get(blocksKey)),
+      saveBlocks: (blocks) => void this.state.update(blocksKey, trimBlocks(blocks)),
       hydrate: () => {
         this.known.set(slot, new Set(this.prefs.recalls.map((item) => item.text)));
       },
@@ -257,6 +269,8 @@ class MqlView implements vscode.Disposable {
     private readonly slot: number,
     private readonly host: ViewHost,
   ) {
+    this.blocks = host.blocks();
+    this.nextId = this.blocks.length;
     this.session = new MqlSession({
       output: (text) => this.onOutput(text),
       ready: () => this.onReadySession(),
@@ -615,7 +629,13 @@ class MqlView implements vscode.Disposable {
     }
     this.closeAfterEnd = isSessionEnd(command);
     const shown = maskSecret(command);
-    const block: Block = { id: ++this.nextId, command: shown, result: '', ...(shown !== command && { secret: true }) };
+    const block: Block = {
+      id: ++this.nextId,
+      command: shown,
+      result: '',
+      ...(shown !== command && { secret: true }),
+      ...(this.booting && { boot: true }),
+    };
     this.blocks.push(block);
     this.activeId = block.id;
     this.activeText = command;
@@ -648,6 +668,7 @@ class MqlView implements vscode.Disposable {
     this.blocks = [];
     this.nextId = 0;
     this.activeId = undefined;
+    this.host.saveBlocks(this.blocks);
     const prefs = this.host.prefs();
     this.host.save({
       ...prefs,
@@ -664,6 +685,7 @@ class MqlView implements vscode.Disposable {
     this.blocks = [];
     this.blockOpen = false;
     this.activeId = undefined;
+    this.host.saveBlocks(this.blocks);
     this.post({ type: 'cleared' });
   }
 
@@ -994,6 +1016,7 @@ class MqlView implements vscode.Disposable {
     if (block) block.elapsed = elapsed;
     this.blockOpen = false;
     this.post({ type: 'blockDone', id, elapsed });
+    this.host.saveBlocks(this.blocks);
     if (block) this.host.log(`${elapsed}ms > ${block.command}\n${block.result.slice(0, logLimit)}`);
   }
 
@@ -1110,6 +1133,40 @@ function loadPrefs(value: unknown): SavedPrefs {
   const prefs = parsePrefs(value);
   if (!isRecord(value) || isRecord(value.drafts) || typeof value.commandText !== 'string' || hasSecret(value.commandText)) return prefs;
   return { ...prefs, drafts: { 1: value.commandText } };
+}
+
+function trimResult(result: string) {
+  if (result.length <= savedResultLimit) return result;
+  const cut = result.lastIndexOf('\n', savedResultLimit);
+  return `${result.slice(0, cut > 0 ? cut : savedResultLimit)}${trimmedNote}`;
+}
+
+function trimBlocks(blocks: Block[]): SavedBlock[] {
+  const kept: SavedBlock[] = [];
+  let total = 0;
+  for (const block of [...blocks].reverse()) {
+    if (block.secret || block.boot) continue;
+    const result = trimResult(block.result);
+    total += result.length + block.command.length;
+    if (kept.length >= savedBlockLimit || total > savedTotalLimit) break;
+    kept.unshift({ command: block.command, result, elapsed: block.elapsed });
+  }
+  return kept;
+}
+
+function loadBlocks(raw: unknown): Block[] {
+  if (!Array.isArray(raw)) return [];
+  const blocks: Block[] = raw
+    .filter(isRecord)
+    .filter((item) => typeof item.command === 'string' && typeof item.result === 'string' && !hasSecret(item.command))
+    .map((item, index) => ({
+      id: index + 1,
+      command: String(item.command),
+      result: String(item.result),
+      ...(typeof item.elapsed === 'number' && { elapsed: item.elapsed }),
+    }));
+  if (blocks.length) blocks[blocks.length - 1].reset = true;
+  return blocks;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
