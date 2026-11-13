@@ -3,7 +3,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 const promptTailPattern = /(MQL<\d*>)\s*$/;
 const promptsPattern = /MQL<\d*>/g;
 const quotedPattern = /"[^"]*"|'[^']*'/g;
-const contextPattern = /(?:^|[;\n])\s*(?:set|push|pop)\b/i;
+const contextPattern = /(?:^|[;\n])\s*(?:set|push|pop)\b|\bcont(?:ext)?\b/i;
 const markerCommand = "print context;";
 const openDelayMs = 200;
 const promptDelayMs = 80;
