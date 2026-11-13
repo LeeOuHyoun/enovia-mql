@@ -1578,7 +1578,7 @@ body.composer-hidden #composer {
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--vscode-textLink-foreground);
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
   font-family: var(--vscode-editor-font-family), ui-monospace, monospace;
   font-size: 12px;
   text-align: left;
@@ -1903,6 +1903,70 @@ body.line-numbers #command {
 
 #command:focus {
   outline: none;
+}
+
+body:not(.hl-off) #command {
+  color: transparent;
+  caret-color: var(--vscode-input-foreground, var(--vscode-editor-foreground));
+}
+
+body:not(.hl-off) #command::selection {
+  color: transparent;
+  background: var(--vscode-editor-selectionBackground, rgba(38, 79, 120, 0.6));
+}
+
+#command-hl {
+  position: absolute;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 60px 8px 10px;
+  box-sizing: border-box;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+  color: var(--vscode-input-foreground, var(--vscode-editor-foreground));
+  background: transparent;
+  font-family: var(--vscode-editor-font-family), ui-monospace, monospace;
+  font-size: var(--vscode-editor-font-size, 13px);
+  line-height: 1.45;
+}
+
+body.hl-off #command-hl {
+  display: none;
+}
+
+#command-wrap:has(#command:disabled) #command-hl {
+  opacity: 0.6;
+}
+
+.hl-verb {
+  color: var(--vscode-debugTokenExpression-name, #c586c0);
+}
+
+.hl-kw {
+  color: var(--vscode-debugTokenExpression-boolean, #569cd6);
+}
+
+.hl-str {
+  color: var(--vscode-debugTokenExpression-string, #ce9178);
+}
+
+.hl-num {
+  color: var(--vscode-debugTokenExpression-number, #b5cea8);
+}
+
+.hl-sel {
+  color: var(--vscode-terminal-ansiCyan, #4ec9b0);
+}
+
+.hl-hole {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+  text-decoration: underline dotted;
+}
+
+.hl-punct {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 #recall-split {

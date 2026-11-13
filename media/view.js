@@ -24,6 +24,7 @@ const jpoRun = document.getElementById('jpoRun');
 const composer = document.getElementById('composer');
 const gutter = document.getElementById('gutter');
 const command = document.getElementById('command');
+const commandHl = document.getElementById('command-hl');
 const recall = document.getElementById('recall');
 const recallSplit = document.getElementById('recall-split');
 const recallFilter = document.getElementById('recall-filter');
@@ -293,7 +294,26 @@ function syncCommandClear() {
   commandClear.disabled = command.disabled || command.value === '';
   placeCommandClear();
   syncGutter();
+  syncHighlight();
   syncComposerHeight();
+}
+
+function placeHighlight() {
+  Object.assign(commandHl.style, {
+    left: `${command.offsetLeft}px`,
+    top: `${command.offsetTop}px`,
+    width: `${command.clientWidth}px`,
+    height: `${command.clientHeight}px`,
+  });
+  commandHl.scrollTop = command.scrollTop;
+}
+
+function syncHighlight() {
+  const on = command.value.length <= HL_MAX_CHARS;
+  document.body.classList.toggle('hl-off', !on);
+  if (on) paintMql(commandHl, `${command.value}\n`);
+  else commandHl.replaceChildren();
+  placeHighlight();
 }
 
 const commandUndo = [];
@@ -604,9 +624,81 @@ function paintSpans(node, text, spans, linked = false) {
   node.replaceChildren(frag);
 }
 
+const HL_TOKEN = /(["'])(?:\\[\s\S]|(?!\1)[^\\])*\1?|<[A-Za-z_][\w|,.]*>|\d+(?:\.\d+){3}|[A-Za-z_][\w.-]*(?:\[[^\]\n]*\][\w.-]*)*|\d+(?:\.\d+)?|[;|*]/g;
+const HL_MAX_CHARS = 20000;
+const HL_EXTRA_WORDS =['bus', 'type', 'name', 'revision', 'id', 'attribute', 'and', 'or', 'not', 'all', 'end', 'on', 'off', 'transaction', 'context', 'user', 'password', 'program', 'set', 'push', 'pop'];
+let hlWords = null;
+
+const highlightWords = () => (hlWords ??= new Set([...CLAUSE_HEADS, ...DDL_WORDS, ...HL_EXTRA_WORDS]));
+
+function isLineStart(text, index) {
+  return text.slice(text.lastIndexOf('\n', index - 1) + 1, index).trim() === '';
+}
+
+function pushQuoted(tokens, text, start, end) {
+  let at = start;
+  for (const m of text.slice(start, end).matchAll(PLACEHOLDER)) {
+    if (!TEMPLATE_HOLES.has(m[0])) continue;
+    const from = start + m.index;
+    if (from > at) tokens.push({ start: at, end: from, cls: 'hl-str' });
+    tokens.push({ start: from, end: from + m[0].length, cls: 'hl-hole' });
+    at = from + m[0].length;
+  }
+  if (at < end) tokens.push({ start: at, end, cls: 'hl-str' });
+}
+
+function wordClass(word, value, isStatementStart, afterVerb) {
+  if (isStatementStart && MQL_STARTERS.has(word)) return 'hl-verb';
+  if (afterVerb && (word === 'query' || MQL_HEADER_TARGETS.has(word))) return 'hl-kw';
+  if (value.includes('[')) return 'hl-sel';
+  return highlightWords().has(word) ? 'hl-kw' : '';
+}
+
+function mqlTokens(text) {
+  const tokens = [];
+  let statementStart = true;
+  let afterVerb = false;
+  for (const m of text.matchAll(HL_TOKEN)) {
+    const value = m[0];
+    const start = m.index;
+    const end = start + value.length;
+    if (value[0] === '"' || value[0] === "'") {
+      pushQuoted(tokens, text, start, end);
+      statementStart = false;
+      afterVerb = false;
+      continue;
+    }
+    const word = /^[A-Za-z_]/.test(value) ? value.toLowerCase() : '';
+    let cls = '';
+    if (value === ';' || value === '|' || value === '*') cls = 'hl-punct';
+    else if (value[0] === '<') cls = TEMPLATE_HOLES.has(value) ? 'hl-hole' : '';
+    else if (!word) cls = 'hl-num';
+    else cls = wordClass(word, value, statementStart || isLineStart(text, start), afterVerb);
+    if (cls) tokens.push({ start, end, cls });
+    afterVerb = cls === 'hl-verb' || (afterVerb && word === 'query');
+    statementStart = value === ';';
+  }
+  return tokens;
+}
+
+function paintMql(node, text) {
+  const frag = document.createDocumentFragment();
+  let at = 0;
+  for (const { start, end, cls } of mqlTokens(text)) {
+    if (start > at) frag.append(text.slice(at, start));
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text.slice(start, end);
+    frag.append(span);
+    at = end;
+  }
+  if (at < text.length) frag.append(text.slice(at));
+  node.replaceChildren(frag);
+}
+
 function paintText(node, text) {
   if (!findQuery || findBad) {
-    node.textContent = text;
+    paintMql(node, text);
     return;
   }
   paintSpans(node, text, findSpans(text, findQuery, findMatchCase, findWholeWord, findUseRegex));
@@ -4550,6 +4642,7 @@ command.addEventListener('input', () => {
 });
 
 command.addEventListener('scroll', () => {
+  commandHl.scrollTop = command.scrollTop;
   if (!assist.hidden) placeAssist();
   if (document.body.classList.contains('line-numbers')) gutter.scrollTop = command.scrollTop;
 });
@@ -5036,6 +5129,7 @@ cfRowsBody.append(gridRowNode());
 syncCreate();
 new ResizeObserver(() => {
   syncGutter();
+  placeHighlight();
 }).observe(command);
 new ResizeObserver(() => {
   syncComposerHeight();
