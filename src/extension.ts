@@ -245,6 +245,7 @@ class MqlView implements vscode.Disposable {
   private txActive = false;
   private bootQueue: string[] = [];
   private commandQueue: Queued[] = [];
+  private readonly confirming = new Set<string>();
   private pendingSide: { lane: SideLane; text: string; token: number } | undefined;
   private bootTimer: ReturnType<typeof setTimeout> | undefined;
   private sideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -472,22 +473,35 @@ class MqlView implements vscode.Disposable {
       this.onSend(text);
       return;
     }
+    const key = withSemicolon(text);
+    if (this.confirming.has(key) || this.isDuplicate(text)) return;
+    this.confirming.add(key);
     const run = '실행';
     const withTx = '트랜잭션 시작 후 실행';
     const advice = isDelete(text) ? ' 운영 환경에서는 del 대신 mod 사용을 권장합니다.' : '';
-    const picked = await vscode.window.showWarningMessage(
-      `${destructive ? '되돌리기 어려운' : '데이터베이스를 변경하는'} 명령을 실행할까요?\n\n${withSemicolon(text)}`,
-      {
-        modal: true,
-        detail: this.txActive
-          ? '현재 트랜잭션 안에서 실행됩니다.'
-          : `트랜잭션 밖에서 실행하면 되돌릴 수 없습니다.${advice}`,
-      },
-      ...(this.txActive ? [run] : [withTx, run]),
-    );
-    if (!picked || this.disposed) return;
-    if (picked === withTx) this.onSend('start transaction;');
-    this.onSend(text);
+    try {
+      const picked = await vscode.window.showWarningMessage(
+        `${destructive ? '되돌리기 어려운' : '데이터베이스를 변경하는'} 명령을 실행할까요?\n\n${key}`,
+        {
+          modal: true,
+          detail: this.txActive
+            ? '현재 트랜잭션 안에서 실행됩니다.'
+            : `트랜잭션 밖에서 실행하면 되돌릴 수 없습니다.${advice}`,
+        },
+        ...(this.txActive ? [run] : [withTx, run]),
+      );
+      if (!picked || this.disposed) return;
+      if (picked === withTx) this.onSend('start transaction;');
+      this.onSend(text);
+    } finally {
+      this.confirming.delete(key);
+    }
+  }
+
+  private isDuplicate(text: string) {
+    const command = withSemicolon(text);
+    if (this.blockOpen && !this.sideLane && this.activeBatch == null && this.activeText === command) return true;
+    return this.commandQueue.some((item) => item.batch == null && withSemicolon(item.text) === command);
   }
 
   private async confirmRestart() {
@@ -522,7 +536,7 @@ class MqlView implements vscode.Disposable {
   }
 
   private onSend(text: string) {
-    if (this.sideLane) return;
+    if (this.sideLane || this.isDuplicate(text)) return;
     if (this.holding || this.booting || this.recovering || !this.inputEnabled) {
       if (this.holding || this.booting || this.recovering) this.commandQueue.push({ text });
       return;

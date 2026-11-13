@@ -407,6 +407,8 @@ function isBusy() {
   return sideBusy || history.querySelector('.block.pending') !== null;
 }
 
+let wasBusy = false;
+
 function syncStatus() {
   const hasNotices = history.querySelector('.notice') !== null;
   const busy = isBusy();
@@ -415,6 +417,11 @@ function syncStatus() {
     button.disabled = command.disabled || busy;
   }
   syncTx();
+  if (busy !== wasBusy) {
+    wasBusy = busy;
+    syncCreate();
+    syncEdit();
+  }
   if (busy) {
     statusNode.dataset.state = 'running';
     statusText.textContent = '실행 중';
@@ -3350,7 +3357,7 @@ function syncCreate() {
   const done = statements.length === 0;
   cfPreview.textContent = done ? '모든 행을 실행했습니다.' : createText(statements);
   cfInsert.disabled = command.disabled || done;
-  cfRun.disabled = command.disabled || sideBusy || done || bad.length > 0 || cfRowsBody.querySelector('tr[data-status="run"]') !== null || statements.some(({ lines }) => placeholderSpans(lines.join(' ')).length > 0);
+  cfRun.disabled = command.disabled || isBusy() || done || bad.length > 0 || cfRowsBody.querySelector('tr[data-status="run"]') !== null || statements.some(({ lines }) => placeholderSpans(lines.join(' ')).length > 0);
   syncCreateWarnings(bad);
 }
 
@@ -3675,13 +3682,14 @@ function syncEdit() {
   efUndo.hidden = undo.length === 0;
   efUndoHead.hidden = undo.length === 0;
   efInsert.disabled = command.disabled || lines.length === 0 || bad.length > 0;
-  efRun.disabled = command.disabled || sideBusy || lines.length === 0 || bad.length > 0;
-  efDelete.disabled = command.disabled || sideBusy || !loaded;
+  const busy = isBusy();
+  efRun.disabled = command.disabled || busy || lines.length === 0 || bad.length > 0;
+  efDelete.disabled = command.disabled || busy || !loaded;
   const at = efStates.indexOf(efState.value);
   const next = at >= 0 ? efStates[at + 1] : undefined;
   const prev = at > 0 ? efStates[at - 1] : undefined;
-  efPromote.disabled = command.disabled || sideBusy || !loaded || (at >= 0 && !next);
-  efDemote.disabled = command.disabled || sideBusy || !loaded || (at >= 0 && !prev);
+  efPromote.disabled = command.disabled || busy || !loaded || (at >= 0 && !next);
+  efDemote.disabled = command.disabled || busy || !loaded || (at >= 0 && !prev);
   efPromote.title = next ? `promote bus → ${next}` : 'promote bus';
   efDemote.title = prev ? `demote bus → ${prev}` : 'demote bus';
   for (const control of cfControls(editView)) {
