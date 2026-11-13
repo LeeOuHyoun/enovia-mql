@@ -693,6 +693,7 @@ class MqlView implements vscode.Disposable {
 
   private onReleased() {
     this.clearTimers();
+    this.closeAfterEnd = false;
     this.settleHistoryBlock();
     if (this.booting) {
       this.noteActiveCommand();
@@ -750,7 +751,7 @@ class MqlView implements vscode.Disposable {
     this.clearQueue();
     this.cancelPendingSide();
     this.finishSide(false);
-    if (this.blocks.length === 0) this.notices = [failNotice];
+    this.notices = [failNotice];
     this.inputEnabled = false;
     this.holding = false;
     this.blockOpen = false;
@@ -770,6 +771,8 @@ class MqlView implements vscode.Disposable {
     this.booting = false;
     this.recovering = false;
     this.bootQueue = [];
+    this.clearQueue();
+    this.cancelPendingSide();
     this.finishSide(false);
     this.inputEnabled = false;
     this.holding = false;
@@ -995,7 +998,7 @@ class MqlView implements vscode.Disposable {
   }
 
   private clearEnabled() {
-    return this.blocks.length > 0;
+    return this.blocks.length > 0 && !this.blockOpen;
   }
 
   private postClear() {

@@ -227,6 +227,7 @@ const SYMBOLIC_ADMINS = new Set([
 ]);
 const schemaCache = new Map();
 let txActive = false;
+let txBase = false;
 let assistIndex = 0;
 let assistMatches = [];
 let pickText = '';
@@ -393,7 +394,7 @@ function updateTxFromCommand(cmd, hasErr = false) {
 }
 
 function recomputeTx(blocks) {
-  txActive = false;
+  txActive = txBase;
   for (const block of blocks) {
     updateTxFromCommand(block.command, hasErrorLine(cleanResult(block.result || '')));
     if (block.reset) txActive = false;
@@ -626,6 +627,8 @@ function paintSpans(node, text, spans, linked = false) {
 
 const HL_TOKEN = /(["'])(?:\\[\s\S]|(?!\1)[^\\])*\1?|<[A-Za-z_][\w|,.]*>|\d+(?:\.\d+){3}|[A-Za-z_][\w.-]*(?:\[[^\]\n]*\][\w.-]*)*|\d+(?:\.\d+)?|[;|*]/g;
 const HL_MAX_CHARS = 20000;
+const FIND_DELAY_MS = 150;
+const GRID_AUTO_ROWS = 1000;
 const HL_EXTRA_WORDS =['bus', 'type', 'name', 'revision', 'id', 'attribute', 'and', 'or', 'not', 'all', 'end', 'on', 'off', 'transaction', 'context', 'user', 'password', 'program', 'set', 'push', 'pop'];
 let hlWords = null;
 
@@ -778,8 +781,17 @@ function paintBlock(item) {
   paintResult(item.querySelector('.result'), text.result);
 }
 
+function hasFindHit(text) {
+  if (!findQuery || findBad) return false;
+  const spansOf = (value) => findSpans(value, findQuery, findMatchCase, findWholeWord, findUseRegex);
+  return spansOf(text.command).length > 0 || spansOf(cleanResult(text.result)).length > 0;
+}
+
 function repaintBlocks() {
-  for (const item of history.querySelectorAll('.block')) paintBlock(item);
+  for (const item of history.querySelectorAll('.block')) {
+    const text = blockText.get(item.dataset.id);
+    if (text && (item.querySelector('mark.hit') || hasFindHit(text))) paintBlock(item);
+  }
 }
 
 function pruneBlockState() {
@@ -1144,6 +1156,13 @@ function setGrid(block, on) {
   const copyBtn = block.querySelector('.block-copy');
   copyBtn.title = copyLabel;
   copyBtn.setAttribute('aria-label', copyLabel);
+}
+
+function autoGrid(item) {
+  const stored = blockText.get(item.dataset.id);
+  if (!stored || !dumpSeparator(stored.command)) return;
+  const grid = gridOf(stored);
+  if (grid && grid.rows.length <= GRID_AUTO_ROWS) setGrid(item, true);
 }
 
 function syncGridButton(item) {
@@ -2726,7 +2745,7 @@ function onSideEnd(message) {
   if (message.token !== activeToken) return;
   const started = sideStarted && !message.failed;
   const lane = pendingLane;
-  const superseded = queuedSide !== null;
+  const superseded = queuedSide?.lane === lane;
   sideBusy = false;
   sideStarted = false;
   if (!command.disabled) sideHold = false;
@@ -3802,6 +3821,7 @@ window.addEventListener('message', (event) => {
     if (item) {
       item.querySelector('.block-time').textContent = formatElapsed(message.elapsed);
       symbolicHint(item);
+      autoGrid(item);
       syncGridButton(item);
     }
     if (stored) {
@@ -3824,6 +3844,7 @@ window.addEventListener('message', (event) => {
     return;
   }
   if (message.type === 'cleared') {
+    txBase = txActive;
     cancelPaint();
     runningId = null;
     for (const item of history.querySelectorAll('.block')) item.remove();
@@ -3959,8 +3980,19 @@ history.addEventListener('click', (event) => {
   insertAtCursor(button.textContent ?? '');
 });
 
-findInput.addEventListener('input', () => {
+let findTimer = 0;
+
+function flushFind() {
+  if (!findTimer) return false;
+  clearTimeout(findTimer);
+  findTimer = 0;
   setFindQuery(findInput.value);
+  return true;
+}
+
+findInput.addEventListener('input', () => {
+  clearTimeout(findTimer);
+  findTimer = setTimeout(flushFind, FIND_DELAY_MS);
 });
 
 findInput.addEventListener('keydown', (event) => {
@@ -3984,7 +4016,7 @@ findInput.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Enter') {
     event.preventDefault();
-    moveFind(event.shiftKey ? -1 : 1);
+    if (!flushFind()) moveFind(event.shiftKey ? -1 : 1);
     return;
   }
   if (event.key === 'ArrowUp') {
@@ -4084,6 +4116,7 @@ window.addEventListener('keydown', (event) => {
   if (!event.ctrlKey && !event.metaKey) return;
   if (event.altKey) return;
   if (event.shiftKey) {
+    if (isOtherInput(document.activeElement)) return;
     event.preventDefault();
     formatCommand();
     return;
@@ -5072,6 +5105,7 @@ clearButton.addEventListener('click', () => {
 });
 
 function resetView() {
+  txBase = false;
   closeAssist();
   closePick();
   closeRowMenu();

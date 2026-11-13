@@ -1940,33 +1940,54 @@ body.hl-off #command-hl {
   opacity: 0.6;
 }
 
+body {
+  --hl-verb: #7e22ce;
+  --hl-kw: #1d4ed8;
+  --hl-str: #15803d;
+  --hl-num: #b45309;
+  --hl-sel: #0e7490;
+  --hl-hole: #ca8a04;
+  --hl-punct: #9ca3af;
+}
+
+body.vscode-dark,
+body.vscode-high-contrast:not(.vscode-high-contrast-light) {
+  --hl-verb: #c678dd;
+  --hl-kw: #61afef;
+  --hl-str: #98c379;
+  --hl-num: #d19a66;
+  --hl-sel: #56b6c2;
+  --hl-hole: #e5c07b;
+  --hl-punct: #7f848e;
+}
+
 .hl-verb {
-  color: var(--vscode-debugTokenExpression-name, #c586c0);
+  color: var(--hl-verb);
 }
 
 .hl-kw {
-  color: var(--vscode-debugTokenExpression-boolean, #569cd6);
+  color: var(--hl-kw);
 }
 
 .hl-str {
-  color: var(--vscode-debugTokenExpression-string, #ce9178);
+  color: var(--hl-str);
 }
 
 .hl-num {
-  color: var(--vscode-debugTokenExpression-number, #b5cea8);
+  color: var(--hl-num);
 }
 
 .hl-sel {
-  color: var(--vscode-terminal-ansiCyan, #4ec9b0);
+  color: var(--hl-sel);
 }
 
 .hl-hole {
-  color: var(--vscode-editorWarning-foreground, #cca700);
+  color: var(--hl-hole);
   text-decoration: underline dotted;
 }
 
 .hl-punct {
-  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  color: var(--hl-punct);
 }
 
 #recall-split {
