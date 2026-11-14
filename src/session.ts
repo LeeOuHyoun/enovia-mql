@@ -10,6 +10,7 @@ const promptDelayMs = 80;
 const immediateExitMs = 2000;
 const batchWaitMs = 20000;
 const quietMs = 5000;
+const learnWaitMs = 60000;
 const learnQuietMs = 100;
 const settleMs = 30;
 const startupLimit = 16384;
@@ -143,7 +144,7 @@ export class MqlSession {
       this.learning = { lines: [], sent: 2, verifyFrom: 0 };
     }
     this.write([text, markerCommand, ...(learn ? [markerCommand] : [])].join("\n"));
-    this.scheduleQuiet();
+    this.scheduleQuiet(learnWaitMs);
     return true;
   }
 
@@ -278,7 +279,7 @@ export class MqlSession {
     if (out) this.events.output(out);
     if (this.learning) this.scheduleLearn();
     else this.scheduleFlush(pipe);
-    this.scheduleQuiet();
+    if (cleanLine(text).trim()) this.scheduleQuiet();
   }
 
   private takeLine(line: string, pipe: Pipe) {
@@ -347,11 +348,11 @@ export class MqlSession {
     this.release();
   }
 
-  private scheduleQuiet() {
+  private scheduleQuiet(delay = quietMs) {
     clearTimeout(this.quietTimer);
     this.quietTimer = undefined;
     if (!this.learning) return;
-    this.quietTimer = setTimeout(() => this.release(), quietMs);
+    this.quietTimer = setTimeout(() => this.release(), delay);
   }
 
   private release() {

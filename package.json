@@ -2,7 +2,7 @@
   "name": "enovia-mql",
   "displayName": "ENOVIA MQL",
   "description": "ENOVIA MQL 세션을 편집기 탭에서 사용합니다.",
-  "version": "0.0.30",
+  "version": "0.0.31",
   "publisher": "local",
   "private": true,
   "license": "MIT",
@@ -34,6 +34,10 @@
       {
         "command": "enovia-mql.joinLines",
         "title": "ENOVIA MQL: 줄 합치기"
+      },
+      {
+        "command": "enovia-mql.shortcuts",
+        "title": "ENOVIA MQL: 단축키 안내"
       }
     ],
     "keybindings": [
@@ -51,6 +55,11 @@
         "command": "enovia-mql.joinLines",
         "key": "ctrl+j",
         "when": "activeWebviewPanelId == 'enovia-mql'"
+      },
+      {
+        "command": "enovia-mql.shortcuts",
+        "key": "ctrl+shift+l",
+        "when": "activeWebviewPanelId == 'enovia-mql'"
       }
     ],
     "menus": {
@@ -66,6 +75,10 @@
         {
           "command": "enovia-mql.joinLines",
           "when": "false"
+        },
+        {
+          "command": "enovia-mql.shortcuts",
+          "when": "activeWebviewPanelId == 'enovia-mql'"
         }
       ]
     },
@@ -76,6 +89,12 @@
           "type": "string",
           "default": "set context user creator;",
           "description": "MQL 세션을 시작한 직후 실행할 접속 명령입니다. 비워 두면 실행하지 않습니다. 비밀번호를 넣으면 설정 파일에 평문으로 남습니다."
+        },
+        "enovia-mql.responseTimeout": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 0,
+          "description": "list · help 조회와 새 객체 만들기 · 객체 편집 서랍의 조회를 기다리는 시간(초)입니다. 이 시간 동안 출력이 없으면 세션을 다시 연결하고, 트랜잭션 중이면 먼저 묻습니다. 0이면 제한하지 않습니다. 콘솔에서 실행한 명령에는 적용하지 않으며, 콘솔 명령은 '실행 중단'으로 끊습니다."
         }
       }
     }

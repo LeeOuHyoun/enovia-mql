@@ -9,7 +9,6 @@ const graphExtension = 'local.3d-mql';
 const graphCommand = '3d-mql.search';
 const maxRecalls = 200;
 const bootTimeoutMs = 5000;
-const sideTimeoutMs = 60000;
 const logLimit = 2000;
 const blocksKey = 'enovia-mql.blocks';
 const savedBlockLimit = 50;
@@ -18,7 +17,7 @@ const savedTotalLimit = 2000000;
 const trimmedNote = '\n… (저장 용량 때문에 결과 앞부분만 복원했습니다)';
 const secretPattern = /'[^']*'|"[^"]*"|(\bpassword\s+)('[^']*'|"[^"]*"|[^\s;'"]+)/gi;
 const contextStatementPattern = /(?:^|;)\s*(?:set|push|pop)\s+context\b/i;
-const metaPattern = /^(?:list (?:type|vault)|print (?:type|policy|attribute) (?:'[^';]*'|"[^";]*") select [a-z ]+|print bus \d+(?:\.\d+){3} select [a-z. ]+|temp query bus (?:(?:'[^';]*'|"[^";]*") ){3}select id dump '\|~\|'|list property on program eServiceSchemaVariableMapping\.tcl);$/;
+const metaPattern = /^(?:list (?:type|vault)|print (?:type|policy|attribute) (?:'[^';]*'|"[^";]*") select [a-z ]+|print (?:type|policy) (?:'[^';]*'|"[^";]*")|print bus \d+(?:\.\d+){3} select [a-z. ]+|push context user (?:'[^';]*'|"[^";]*"); print bus \d+(?:\.\d+){3} select current\.access; pop context|temp query bus (?:(?:'[^';]*'|"[^";]*") ){3}select id dump '\|~\|'|temp query bus "eService Trigger Program Parameters" (?:'[^';]*'|"[^";]*") \* select id current "attribute\[eService Program Name\]" "attribute\[eService Method Name\]" "attribute\[eService Sequence Number\]" dump '\|~\|'|list property on program eServiceSchemaVariableMapping\.tcl|list property to [a-z]+ (?:'[^';]*'|"[^";]*"));$/;
 
 type Block = {
   id: number;
@@ -101,6 +100,7 @@ type Outbound =
   | { type: 'suggest' }
   | { type: 'format' }
   | { type: 'joinLines' }
+  | { type: 'shortcuts' }
   | { type: 'sideStart'; lane: SideLane; token: number }
   | { type: 'sideChunk'; lane: SideLane; token: number; text: string }
   | { type: 'sideEnd'; lane: SideLane; token: number; failed?: boolean }
@@ -127,6 +127,9 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand('enovia-mql.joinLines', () => {
       host.joinLines();
+    }),
+    vscode.commands.registerCommand('enovia-mql.shortcuts', () => {
+      host.shortcuts();
     }),
     status,
     output,
@@ -206,6 +209,11 @@ class MqlHost implements vscode.Disposable {
   joinLines() {
     const view = this.views.find((item) => item.focused()) ?? this.views[this.views.length - 1];
     view?.joinLines();
+  }
+
+  shortcuts() {
+    const view = this.views.find((item) => item.focused()) ?? this.views[this.views.length - 1];
+    view?.shortcuts();
   }
 
   private viewPrefs(slot: number): ViewPrefs {
@@ -314,6 +322,10 @@ class MqlView implements vscode.Disposable {
     this.post({ type: 'joinLines' });
   }
 
+  shortcuts() {
+    this.post({ type: 'shortcuts' });
+  }
+
   postGraph() {
     this.post({ type: 'graph', available: graphAvailable() });
   }
@@ -410,7 +422,13 @@ class MqlView implements vscode.Disposable {
       return;
     }
     if (message.type === 'copy' && typeof message.text === 'string') {
-      void vscode.env.clipboard.writeText(message.text);
+      void vscode.env.clipboard.writeText(message.text).then(() => {
+        vscode.window.setStatusBarMessage('$(check) 클립보드에 복사했습니다', 2000);
+      });
+      return;
+    }
+    if (message.type === 'openKeybindings') {
+      void vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'enovia-mql');
       return;
     }
     if (message.type === 'notify' && typeof message.text === 'string') {
@@ -433,6 +451,10 @@ class MqlView implements vscode.Disposable {
       void this.onPickJpo();
       return;
     }
+    if (message.type === 'openJpo' && typeof message.program === 'string') {
+      void this.openJpo(message.program, typeof message.method === 'string' ? message.method : '');
+      return;
+    }
     if (message.type === 'clear') this.onClear();
     if (message.type === 'restart') void this.confirmRestart();
   }
@@ -453,6 +475,23 @@ class MqlView implements vscode.Disposable {
     });
     const picked = uris?.[0]?.fsPath;
     if (picked) this.post({ type: 'jpoPicked', path: picked });
+  }
+
+  private async openJpo(program: string, method: string) {
+    const name = program.replace(/[^\w$.-]/g, '');
+    const target = method.replace(/[^\w$]/g, '');
+    try {
+      const [file] = await vscode.workspace.findFiles(`**/${name}_mxJPO.java`, '**/node_modules/**', 1);
+      if (!name || !file) throw new Error(`워크스페이스에서 ${name}_mxJPO.java 파일을 찾지 못했습니다.`);
+      const document = await vscode.workspace.openTextDocument(file);
+      const source = document.getText();
+      const declared = target ? new RegExp(`\\b(?:public|protected|private)\\b[^;{(]*\\b${target}\\s*\\(`).exec(source) : null;
+      const offset = declared ? declared.index : target ? Math.max(source.search(new RegExp(`\\b${target}\\s*\\(`)), 0) : 0;
+      const position = document.positionAt(offset);
+      await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, selection: new vscode.Range(position, position) });
+    } catch (error) {
+      void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async openDocument(content: string) {
@@ -600,7 +639,8 @@ class MqlView implements vscode.Disposable {
 
   private scheduleSideTimeout() {
     clearTimeout(this.sideTimer);
-    this.sideTimer = setTimeout(() => void this.onSideTimeout(), sideTimeoutMs);
+    const limit = responseTimeoutMs();
+    this.sideTimer = limit > 0 ? setTimeout(() => void this.onSideTimeout(), limit) : undefined;
   }
 
   private async onSideTimeout() {
@@ -610,7 +650,7 @@ class MqlView implements vscode.Disposable {
     if (this.txActive) {
       const reconnect = '다시 연결';
       const picked = await vscode.window.showWarningMessage(
-        '조회가 60초 동안 응답하지 않습니다. 세션을 다시 연결할까요?',
+        `조회가 ${responseTimeoutMs() / 1000}초 넘게 응답하지 않습니다. 세션을 다시 연결할까요?`,
         { modal: true, detail: '세션을 다시 연결하므로 진행 중인 트랜잭션은 롤백됩니다.' },
         reconnect,
       );
@@ -1229,6 +1269,11 @@ function maskSecret(text: string) {
 
 function hasSecret(text: string) {
   return maskSecret(text) !== text;
+}
+
+function responseTimeoutMs() {
+  const value = Math.floor(Number(vscode.workspace.getConfiguration('enovia-mql').get('responseTimeout', 60)));
+  return value >= 0 ? value * 1000 : 60000;
 }
 
 function configuredContext() {

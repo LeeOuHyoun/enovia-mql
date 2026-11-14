@@ -633,7 +633,7 @@ function paintSpans(node, text, spans, linked = false) {
   node.replaceChildren(frag);
 }
 
-const HL_TOKEN = /(["'])(?:\\[\s\S]|(?!\1)[^\\])*\1?|<[A-Za-z_][\w|,.]*>|\d+(?:\.\d+){3}|[A-Za-z_][\w.-]*(?:\[[^\]\n]*\][\w.-]*)*|\d+(?:\.\d+)?|[;|*]/g;
+const HL_TOKEN = /(?<=^|[\s;])#[^\r\n]*|(["'])(?:\\[\s\S]|(?!\1)[^\\])*\1?|<[A-Za-z_][\w|,.]*>|\d+(?:\.\d+){3}|[A-Za-z_][\w.-]*(?:\[[^\]\n]*\][\w.-]*)*|\d+(?:\.\d+)?|[;|*]/g;
 const HL_MAX_CHARS = 20000;
 const FIND_DELAY_MS = 150;
 const GRID_AUTO_ROWS = 1000;
@@ -673,6 +673,10 @@ function mqlTokens(text) {
     const value = m[0];
     const start = m.index;
     const end = start + value.length;
+    if (value[0] === '#') {
+      tokens.push({ start, end, cls: 'hl-cmt' });
+      continue;
+    }
     if (value[0] === '"' || value[0] === "'") {
       pushQuoted(tokens, text, start, end);
       statementStart = false;
@@ -1197,7 +1201,6 @@ function symbolicTarget(cmd) {
 }
 
 let symbolics = null;
-let symbolicsFailed = false;
 let symbolicsLoad = null;
 let symbolicsGen = 0;
 
@@ -1216,18 +1219,36 @@ function loadSymbolics() {
   const gen = symbolicsGen;
   symbolicsLoad ??= requestMeta('list property on program eServiceSchemaVariableMapping.tcl').then((raw) => {
     if (gen !== symbolicsGen) return null;
-    if (raw == null || hasErrorLine(cleanResult(raw))) symbolicsFailed = true;
-    else symbolics = parseSymbolics(raw);
+    if (raw != null && !hasErrorLine(cleanResult(raw))) symbolics = parseSymbolics(raw);
     return symbolics;
   });
   return symbolicsLoad;
 }
 
+const symbolicChecks = new Map();
+
 function forgetSymbolics() {
   symbolicsGen += 1;
   symbolics = null;
-  symbolicsFailed = false;
   symbolicsLoad = null;
+  symbolicChecks.clear();
+}
+
+function hasSymbolic(admin, name) {
+  const key = `${admin} ${name}`;
+  if (symbolics) return Promise.resolve(symbolics.has(key));
+  if (!symbolicChecks.has(key)) {
+    const gen = symbolicsGen;
+    const check = requestMeta(`list property to ${admin} ${formatSchemaName(name)}`).then((raw) => {
+      if (raw != null && !hasErrorLine(cleanResult(raw))) {
+        return cleanResult(raw).split('\n').some((line) => /^\S+\s+on\s+program\s+eServiceSchemaVariableMapping\.tcl\s+to\s/i.test(line.trim()));
+      }
+      if (gen === symbolicsGen) symbolicChecks.delete(key);
+      return null;
+    });
+    symbolicChecks.set(key, check);
+  }
+  return symbolicChecks.get(key);
 }
 
 function symbolicHint(item) {
@@ -1236,14 +1257,12 @@ function symbolicHint(item) {
   const target = symbolicTarget(stored.command);
   if (!target || hasErrorLine(cleanResult(stored.result))) return;
   if ([...blockText.values()].some((b) => sameCommand(b.command, target.cmd))) return;
-  if (!symbolics && !symbolicsFailed) {
-    void loadSymbolics().then(() => {
-      if (item.isConnected && (symbolics || symbolicsFailed)) symbolicHint(item);
-    });
-    return;
-  }
-  if (symbolics?.has(`${target.admin} ${target.name}`)) return;
-  const cmd = target.cmd;
+  void hasSymbolic(target.admin, target.name).then((found) => {
+    if (found !== true && item.isConnected && !item.querySelector('.block-hint:not(.block-undo)')) appendSymbolicHint(item, target.cmd);
+  });
+}
+
+function appendSymbolicHint(item, cmd) {
   const hint = document.createElement('div');
   hint.className = 'block-hint';
   hint.dataset.cmd = cmd;
@@ -1715,6 +1734,13 @@ function tokenizeMql(text) {
       i += 1;
       continue;
     }
+    if (ch === '#') {
+      let end = i;
+      while (end < len && text[end] !== '\r' && text[end] !== '\n') end += 1;
+      tokens.push({ type: 'comment', value: text.slice(i, end), start: i, end });
+      i = end;
+      continue;
+    }
     let j = i;
     let quote = '';
     let bracketDepth = 0;
@@ -1779,10 +1805,13 @@ function splitMqlStatements(text) {
   let startOffset = -1;
   let endOffset = -1;
   let afterNewline = false;
+  let trailing = null;
 
-  const flush = () => {
+  const flush = (semiEnd) => {
     if (current.length > 0) {
-      statements.push({ words: current, start: startOffset, end: endOffset });
+      const code = codeWords(current);
+      const codeEnd = semiEnd ?? (code.length > 0 ? code[code.length - 1].end : endOffset);
+      statements.push({ words: current, start: startOffset, end: endOffset, codeEnd });
       current = [];
       startOffset = -1;
       endOffset = -1;
@@ -1795,12 +1824,19 @@ function splitMqlStatements(text) {
     if (tok.type === 'semi') {
       if (current.length > 0) {
         endOffset = tok.end;
-        flush();
+        flush(tok.end);
+        trailing = statements[statements.length - 1];
       }
       continue;
     }
     if (tok.type === 'newline') {
+      trailing = null;
       if (current.length > 0) afterNewline = true;
+      continue;
+    }
+    if (tok.type === 'comment' && current.length === 0 && trailing) {
+      trailing.words.push(tok);
+      trailing.end = tok.end;
       continue;
     }
     if (afterNewline && current.length > 0) {
@@ -1809,7 +1845,7 @@ function splitMqlStatements(text) {
         if (tokens[k].type === 'semi' || tokens[k].type === 'newline') break;
         if (tokens[k].type === 'word') restWords.push(tokens[k]);
       }
-      if (isStarterSequence(restWords, 0) && !continuesDdl(current, restWords[0].value.toLowerCase())) {
+      if (isStarterSequence(restWords, 0) && !continuesDdl(codeWords(current), restWords[0].value.toLowerCase())) {
         flush();
       } else {
         afterNewline = false;
@@ -1942,15 +1978,38 @@ function isClauseBreak(words, idx, headerEnd) {
   return false;
 }
 
-function formatSingleStatement(words) {
-  if (words.length === 0) return '';
+function codeWords(words) {
+  return words.filter((w) => w.type !== 'comment');
+}
+
+function commentsByWord(words) {
+  const notes = new Map();
+  let at = -1;
+  for (const w of words) {
+    if (w.type !== 'comment') {
+      at += 1;
+      continue;
+    }
+    if (!notes.has(at)) notes.set(at, []);
+    notes.get(at).push(w.value);
+  }
+  return notes;
+}
+
+function formatSingleStatement(allWords) {
+  const words = codeWords(allWords);
+  const notes = commentsByWord(allWords);
+  const leading = notes.get(-1) ?? [];
+  if (words.length === 0) return leading.join('\n');
   const headerEnd = minHeaderLength(words);
   const isDdl = isSchemaDdl(words);
   const lines = [];
+  const lineNotes = [];
   let currentLine = [];
   let currentIndent = '';
   let section = '';
   let inSelect = false;
+  let breakNext = false;
 
   const indentFor = (lower) => {
     if (!isDdl) return '  ';
@@ -1973,24 +2032,38 @@ function formatSingleStatement(words) {
     const lower = word.toLowerCase();
     const shouldBreak = isClauseBreak(words, i, headerEnd) && !(inSelect && lower !== 'where' && lower !== 'dump' && lower !== 'recordsep' && lower !== 'tcl' && lower !== 'output' && lower !== 'orderby' && lower !== 'limit');
 
-    if (shouldBreak && currentLine.length > 0) {
+    if ((shouldBreak || breakNext) && currentLine.length > 0) {
       lines.push(lines.length === 0 ? currentLine.join(' ') : currentIndent + currentLine.join(' '));
       currentLine = [];
-      currentIndent = indentFor(lower);
-      inSelect = lower === 'select';
+      if (shouldBreak) {
+        currentIndent = indentFor(lower);
+        inSelect = lower === 'select';
+      } else if (!currentIndent) {
+        currentIndent = '  ';
+      }
     } else if (i >= headerEnd && lower === 'select') {
       inSelect = true;
     }
 
+    breakNext = false;
     currentLine.push(word);
+    if (notes.has(i)) {
+      lineNotes[lines.length] = notes.get(i);
+      breakNext = true;
+    }
   }
 
   if (currentLine.length > 0) {
     lines.push(lines.length === 0 ? currentLine.join(' ') : currentIndent + currentLine.join(' '));
   }
 
-  const joined = lines.join('\n');
-  return joined.endsWith(';') ? joined : `${joined};`;
+  const last = lines.length - 1;
+  if (!lines[last].endsWith(';')) lines[last] += ';';
+  const body = lines.flatMap((line, index) => {
+    const [first, ...rest] = lineNotes[index] ?? [];
+    return [first ? `${line} ${first}` : line, ...rest.map((note) => `${index === 0 ? '' : currentIndent}${note}`)];
+  });
+  return [...leading, ...body].join('\n');
 }
 
 function formatMqlText(text) {
@@ -1999,14 +2072,15 @@ function formatMqlText(text) {
   return statements.map((stmt) => formatSingleStatement(stmt.words)).join('\n\n');
 }
 
-function flattenStatement(words) {
+function flattenStatement(allWords) {
+  const words = codeWords(allWords);
   if (words.length === 0) return '';
   const line = words.map((w) => w.value).join(' ');
   return line.endsWith(';') ? line : `${line};`;
 }
 
 function formatCommand() {
-  if (command.disabled) return;
+  if (command.disabled || isOtherInput(document.activeElement)) return;
   closeAssist();
   const value = command.value;
   if (!value.trim()) return;
@@ -2153,8 +2227,8 @@ function statementAt(text, cursor) {
 function ensureStatementSemicolon() {
   const text = command.value;
   const stmt = statementSpanAt(text, caretOffset());
-  if (!stmt || text[stmt.end - 1] === ';') return;
-  const index = stmt.end;
+  if (!stmt || codeWords(stmt.words).length === 0 || text[stmt.codeEnd - 1] === ';') return;
+  const index = stmt.codeEnd;
   const start = command.selectionStart ?? 0;
   const end = command.selectionEnd ?? start;
   const shift = (pos) => (pos >= index ? pos + 1 : pos);
@@ -2182,22 +2256,25 @@ function placeholderSpans(text) {
     .map((m) => ({ start: m.index, end: m.index + m[0].length }));
 }
 
-function openQuoteAt(text, span) {
-  let quote = '';
-  let at = -1;
-  for (let i = span.start; i < span.end; i += 1) {
-    const c = text[i];
-    if (quote) {
-      if (c === '\\') i += 1;
-      else if (c === quote) quote = '';
-      continue;
+function openQuoteAt(text, stmt) {
+  for (const word of codeWords(stmt.words)) {
+    let quote = '';
+    let at = -1;
+    for (let i = word.start; i < word.end; i += 1) {
+      const c = text[i];
+      if (quote) {
+        if (c === '\\') i += 1;
+        else if (c === quote) quote = '';
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        at = i;
+      }
     }
-    if (c === '"' || c === "'") {
-      quote = c;
-      at = i;
-    }
+    if (quote) return { start: at, end: at + 1 };
   }
-  return quote ? { start: at, end: at + 1 } : null;
+  return null;
 }
 
 function selectSpan(span) {
@@ -2221,7 +2298,7 @@ function runStatement() {
   closeAssist();
   if (command.disabled || isBusy()) return;
   const stmt = statementSpanAt(command.value, caretOffset());
-  const hole = stmt && placeholderSpans(command.value).find((s) => s.start >= stmt.start && s.end <= stmt.end);
+  const hole = stmt && placeholderSpans(command.value).find((s) => codeWords(stmt.words).some((w) => s.start >= w.start && s.end <= w.end));
   if (hole) {
     selectSpan(hole);
     vscode.postMessage({ type: 'notify', text: '채우지 않은 <…> 칸이 있어 실행하지 않았습니다.' });
@@ -3040,6 +3117,26 @@ function setCreateNote(text) {
   cfNote.textContent = text;
 }
 
+const READ_STATEMENT = /^(?:print|list|temp|expand|query|help|version|eval|verb\w*|(?:start|commit)\s+trans\w*|(?:set|push|pop)\s+cont\w*)\b/i;
+const DATA_WRITE_STATEMENT = /^\w+\s+(?:bus(?:inessobject)?|connection)\b/i;
+
+function isSchemaWrite(cmd) {
+  return cmd
+    .split(';')
+    .map((statement) => statement.trim())
+    .some((statement) => statement && !READ_STATEMENT.test(statement) && !DATA_WRITE_STATEMENT.test(statement));
+}
+
+function forgetSchema() {
+  schemaCache.clear();
+  attrMeta.clear();
+  cfTypeLoaded = '';
+  cfPolicyLoaded = '';
+  fillDatalist(cfTypes, []);
+  fillDatalist(cfVaults, []);
+  if (document.body.classList.contains('drawer-open') && drawerLane === 'create') void loadCreateLists(true);
+}
+
 async function loadCreateLists(force) {
   const failed = [];
   for (const [kind, list] of [['type', cfTypes], ['vault', cfVaults]]) {
@@ -3582,6 +3679,7 @@ async function loadEdit(oid = efOid.value.trim()) {
   }
   efLoaded = oid;
   efStates = [];
+  resetEditDetails();
   renderEdit(null);
   setEditNote('객체 조회 중');
   const data = busValues(await requestMeta(`print bus ${oid} select ${EF_SELECT}`));
@@ -3595,6 +3693,7 @@ async function loadEdit(oid = efOid.value.trim()) {
   renderEdit(data);
   setEditNote(names.length === 0 ? '속성이 없습니다.' : '');
   await loadEditStates(data.basics.get('policy') ?? '', oid);
+  if (efLoaded === oid) loadOpenDetails();
 }
 
 async function loadEditStates(policy, oid) {
@@ -3692,6 +3791,7 @@ function syncEdit() {
   efDemote.disabled = command.disabled || busy || !loaded || (at >= 0 && !prev);
   efPromote.title = next ? `promote bus → ${next}` : 'promote bus';
   efDemote.title = prev ? `demote bus → ${prev}` : 'demote bus';
+  for (const button of editView.querySelectorAll('.ef-detail-btn')) button.disabled = command.disabled || busy;
   for (const control of cfControls(editView)) {
     const key = controlKey(control);
     const changed = loaded && efOrigin.has(key) && control.value !== efOrigin.get(key);
@@ -3721,10 +3821,266 @@ function reloadEditAfter(stored, id) {
   }
   if (/^delete\b/i.test(text)) {
     renderEdit(null);
+    resetEditDetails();
     setEditNote('객체를 삭제했습니다.');
     return;
   }
   void loadEdit(efLoaded);
+}
+
+const efDetails = {
+  states: document.getElementById('ef-detail-states'),
+  triggers: document.getElementById('ef-detail-triggers'),
+  history: document.getElementById('ef-detail-history'),
+};
+const efDetailLoaded = new Map();
+const SIGN_ACTIONS = ['approve', 'reject', 'ignore', 'unsign'];
+const TRIGGER_MANAGER = 'emxTriggerManager';
+const TRIGGER_EVENT = /(\w+):([\w.$-]+)\(([^)]*)\)/g;
+const TRIGGER_STEP_SELECT = 'select id current "attribute[eService Program Name]" "attribute[eService Method Name]" "attribute[eService Sequence Number]" dump \'|~|\'';
+
+function detailNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function detailNote(text) {
+  return detailNode('p', 'ef-detail-note', text);
+}
+
+function detailButton(label, title, onClick) {
+  const button = detailNode('button', 'ef-detail-btn', label);
+  button.type = 'button';
+  button.title = title;
+  button.disabled = command.disabled || isBusy();
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function selectPairs(raw) {
+  if (raw == null || hasErrorLine(cleanResult(raw))) return [];
+  return cleanResult(raw).split('\n').flatMap((line) => {
+    const m = line.match(/^\s*(\S.*?) =(?: (.*))?$/);
+    return m ? [[m[1], (m[2] ?? '').trim()]] : [];
+  });
+}
+
+function resetEditDetails() {
+  efDetailLoaded.clear();
+  for (const details of Object.values(efDetails)) details.querySelector('.ef-detail-body').replaceChildren();
+}
+
+function loadOpenDetails() {
+  for (const [name, details] of Object.entries(efDetails)) {
+    if (details.open) void loadDetail(name);
+  }
+}
+
+async function loadDetail(name) {
+  const oid = efLoaded;
+  if (!isObjectId(oid) || efOrigin.size === 0) return;
+  efDetailLoaded.set(name, oid);
+  const body = efDetails[name].querySelector('.ef-detail-body');
+  body.replaceChildren(detailNote('조회 중'));
+  const loaders = { states: statesDetail, triggers: triggersDetail, history: historyDetail };
+  const nodes = await loaders[name](oid);
+  if (efLoaded !== oid || efDetailLoaded.get(name) !== oid) return;
+  body.replaceChildren(...nodes);
+}
+
+async function historyDetail(oid) {
+  const values = selectValues(await requestMeta(`print bus ${oid} select history`), 'history');
+  if (!values) return [detailNote('이력을 조회하지 못했습니다.')];
+  if (values.length === 0) return [detailNote('이력이 없습니다.')];
+  const filter = detailNode('input', 'cf-input ef-detail-filter');
+  filter.placeholder = '이력 필터';
+  filter.spellcheck = false;
+  filter.autocomplete = 'off';
+  const items = values.map((value) => detailNode('li', '', value));
+  const list = detailNode('ul', 'ef-history');
+  list.append(...items);
+  filter.addEventListener('input', () => {
+    const query = filter.value.trim().toLowerCase();
+    for (const item of items) item.hidden = query !== '' && !item.textContent.toLowerCase().includes(query);
+  });
+  return [filter, list];
+}
+
+async function statesDetail(oid) {
+  const base = await requestMeta(`print bus ${oid} select current state`);
+  const states = selectValues(base, 'state');
+  if (!states) return [detailNote('state를 조회하지 못했습니다.')];
+  const actualRaw = await requestMeta(`print bus ${oid} select state.actual`);
+  const signRaw = await requestMeta(`print bus ${oid} select state.signature.satisfied`);
+  const accessRaw = await requestMeta(`print bus ${oid} select current.access`);
+  const current = keyValues(base, 'current')[0] ?? '';
+  const actual = new Map(selectPairs(actualRaw).flatMap(([key, value]) => {
+    const m = key.match(/^state\[(.+?)\]\.actual$/);
+    return m ? [[m[1], value]] : [];
+  }));
+  const signatures = selectPairs(signRaw).flatMap(([key, value]) => {
+    const m = key.match(/^state\[(.+?)\]\.signature\[(.+)\]\.satisfied$/);
+    return m ? [{ state: m[1], name: m[2], satisfied: /^true$/i.test(value) }] : [];
+  });
+  const rows = states.map((name, index) => stateRow(oid, name, index, name === current, actual.get(name) ?? '', signatures.filter((item) => item.state === name)));
+  return [...rows, accessNode(oid, keyValues(accessRaw, 'current.access')[0] ?? '')];
+}
+
+function stateRow(oid, name, index, isCurrent, actual, signatures) {
+  const row = detailNode('div', isCurrent ? 'ef-state-row current' : 'ef-state-row');
+  const head = detailNode('div', 'ef-state-head');
+  head.append(detailNode('span', 'ef-state-index', String(index + 1)), detailNode('span', 'ef-state-name', name), detailNode('span', 'ef-state-actual', actual));
+  if (isCurrent) head.append(detailNode('span', 'ef-state-badge', 'CURRENT'));
+  row.append(head);
+  for (const signature of signatures) {
+    const line = detailNode('div', 'ef-sign');
+    line.append(detailNode('span', signature.satisfied ? 'ef-sign-mark ok' : 'ef-sign-mark', signature.satisfied ? '✓' : '✗'), detailNode('span', 'ef-sign-name', signature.name));
+    if (isCurrent) {
+      for (const kind of SIGN_ACTIONS) line.append(detailButton(kind, `${kind} bus ${oid} signature … (실행 전에 확인 창이 뜹니다)`, () => signBus(kind, signature.name)));
+    }
+    row.append(line);
+  }
+  return row;
+}
+
+function signBus(kind, signature) {
+  const oid = efLoaded;
+  const quoted = mqlQuote(signature);
+  if (!isObjectId(oid) || !quoted || command.disabled || isBusy()) return;
+  sendEdit(`${kind} bus ${oid} signature ${quoted};`, true, kind === 'unsign' ? '' : `unsign bus ${oid} signature ${quoted};`);
+}
+
+function accessNode(oid, access) {
+  const box = detailNode('div', 'ef-access');
+  box.append(detailNode('p', 'ef-access-line', `접속 사용자 access: ${access || '(조회하지 못함)'}`));
+  const form = detailNode('form', 'ef-access-form');
+  const user = detailNode('input', 'cf-input');
+  user.placeholder = '다른 사용자의 access 확인';
+  user.spellcheck = false;
+  user.autocomplete = 'off';
+  const submit = detailNode('button', 'ef-detail-btn', '확인');
+  submit.type = 'submit';
+  const result = detailNode('p', 'ef-access-line');
+  form.append(user, submit);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void checkUserAccess(oid, user.value.trim(), result);
+  });
+  box.append(form, result);
+  return box;
+}
+
+async function checkUserAccess(oid, user, out) {
+  const quoted = user ? mqlQuote(user) : null;
+  if (!quoted) return;
+  out.textContent = '조회 중';
+  const raw = await requestMeta(`push context user ${quoted}; print bus ${oid} select current.access; pop context;`);
+  if (efLoaded !== oid) return;
+  const values = selectValues(raw, 'current.access');
+  out.textContent = values == null ? `${user}: 조회하지 못했습니다.` : `${user}: ${values[0] || '(access 없음)'}`;
+}
+
+function parseTriggers(raw) {
+  const events = [];
+  let state = '';
+  for (const line of cleanResult(raw).split('\n')) {
+    state = line.match(/^\s+state\s+(.+?)\s*$/)?.[1] ?? state;
+    for (const [, event, program, input] of line.matchAll(TRIGGER_EVENT)) {
+      events.push({ state, event, program, input: input.trim(), inherited: /\binherited\b/i.test(line) });
+    }
+  }
+  return events;
+}
+
+function triggerInputs(input) {
+  return input.split(/[\s,]+/).filter(Boolean);
+}
+
+function triggerKey(event) {
+  return [event.kind, event.kind === 'type' ? '' : event.name, event.state, event.event, event.program, event.input].join('|');
+}
+
+function triggerSteps(raw) {
+  if (raw == null || hasErrorLine(cleanResult(raw))) return [];
+  return cleanResult(raw)
+    .split('\n')
+    .map((line) => line.trim().split('|~|'))
+    .filter((fields) => fields.length >= 8)
+    .map(([, name, revision, id, current, program, method, sequence]) => ({ name, revision, id, current, program, method, sequence }))
+    .sort((a, b) => Number(a.sequence) - Number(b.sequence));
+}
+
+async function triggersDetail(oid) {
+  const type = efType.value.trim();
+  const policy = efPolicy.value.trim();
+  const typeQuoted = mqlQuote(type);
+  const info = typeQuoted ? await loadTypeInfo(type, typeQuoted, () => efLoaded === oid) : null;
+  if (efLoaded !== oid) return [];
+  const sources = [
+    ...(info?.chain ?? (type ? [type] : [])).map((name, index) => ({ kind: 'type', name, inherited: index > 0 })),
+    ...(policy ? [{ kind: 'policy', name: policy, inherited: false }] : []),
+  ];
+  const parsed = [];
+  for (const source of sources) {
+    const quoted = mqlQuote(source.name);
+    const raw = quoted ? await requestMeta(`print ${source.kind} ${quoted}`) : null;
+    if (efLoaded !== oid) return [];
+    if (raw == null || hasErrorLine(cleanResult(raw))) continue;
+    for (const event of parseTriggers(raw)) parsed.push({ ...source, ...event, inherited: source.inherited || event.inherited });
+  }
+  const events = parsed.filter((event, index) => !parsed.slice(index + 1).some((other) => triggerKey(other) === triggerKey(event)));
+  if (events.length === 0) return [detailNote('트리거가 없습니다.')];
+  const names = [...new Set(events.filter((event) => event.program === TRIGGER_MANAGER).flatMap((event) => triggerInputs(event.input)))];
+  const namesQuoted = names.length > 0 ? mqlQuote(names.join(',')) : null;
+  const steps = namesQuoted ? triggerSteps(await requestMeta(`temp query bus "eService Trigger Program Parameters" ${namesQuoted} * ${TRIGGER_STEP_SELECT}`)) : [];
+  if (efLoaded !== oid) return [];
+  return triggerGroups(events, steps, efState.value.trim());
+}
+
+function jpoButton(program, method) {
+  const button = detailNode('button', 'ef-jpo-btn', 'JPO');
+  button.type = 'button';
+  button.title = `워크스페이스에서 ${program}_mxJPO.java${method ? ` · ${method}` : ''} 열기`;
+  button.addEventListener('click', () => vscode.postMessage({ type: 'openJpo', program, method }));
+  return button;
+}
+
+function triggerGroups(events, steps, current) {
+  const groups = new Map();
+  for (const event of events) {
+    const key = [event.kind, event.name, event.state].join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+  }
+  return [...groups.values()].map((items) => {
+    const { kind, name, state } = items[0];
+    const box = detailNode('div', 'ef-trigger-group');
+    const title = [kind, name, state && `state ${state}`, state && state === current && 'CURRENT'].filter(Boolean).join(' · ');
+    box.append(detailNode('p', 'ef-trigger-title', title));
+    for (const event of items) {
+      const line = detailNode('div', 'ef-trigger-event');
+      line.append(detailNode('span', 'ef-trigger-name', event.event), detailNode('span', 'ef-trigger-program', `${event.program}(${event.input})${event.inherited ? ' (상속)' : ''}`));
+      if (event.program !== TRIGGER_MANAGER) line.append(jpoButton(event.program, ''));
+      box.append(line);
+      if (event.program !== TRIGGER_MANAGER) continue;
+      for (const step of steps.filter((item) => triggerInputs(event.input).includes(item.name))) {
+        const row = detailNode('div', step.current === 'Active' ? 'ef-trigger-step' : 'ef-trigger-step inactive');
+        row.append(detailNode('span', 'ef-step-seq', step.sequence), detailNode('span', 'ef-step-target', `${step.program}.${step.method}`));
+        if (step.current !== 'Active') row.append(detailNode('span', 'ef-step-state', step.current));
+        if (step.program) row.append(jpoButton(step.program, step.method));
+        box.append(row);
+      }
+    }
+    return box;
+  });
+}
+
+for (const [name, details] of Object.entries(efDetails)) {
+  details.addEventListener('toggle', () => {
+    if (details.open && efDetailLoaded.get(name) !== efLoaded) void loadDetail(name);
+  });
 }
 
 let stageGrow = '';
@@ -3827,6 +4183,7 @@ window.addEventListener('message', (event) => {
     if (stored) stored.elapsed = message.elapsed;
     const failed = stored && hasErrorLine(cleanResult(stored.result));
     if (failed) recomputeAllTx();
+    if (stored && !failed && isSchemaWrite(stored.command)) forgetSchema();
     const item = blockById(id);
     if (item && failed && item.classList.contains('collapsed')) setFolded(item, false);
     if (item) {
@@ -3886,6 +4243,7 @@ window.addEventListener('message', (event) => {
     return;
   }
   if (message.type === 'clearEnabled') setClearEnabled(message.enabled);
+  if (message.type === 'shortcuts') setGuideOpen(guide.hidden);
   if (message.type === 'suggest') openAssist(true);
   if (message.type === 'format') formatCommand();
   if (message.type === 'joinLines') joinLines();
@@ -3956,7 +4314,9 @@ history.addEventListener('click', (event) => {
   const copyBtn = target.closest('.block-copy');
   if (copyBtn) {
     const text = blockContent(copyBtn.closest('.block'));
-    if (text) vscode.postMessage({ type: 'copy', text });
+    if (!text) return;
+    vscode.postMessage({ type: 'copy', text });
+    flashCopied(copyBtn);
     return;
   }
   const openBtn = target.closest('.block-open');
@@ -4981,8 +5341,54 @@ efDemote.addEventListener('click', () => {
 });
 
 efUndoCopy.addEventListener('click', () => {
-  if (efUndo.textContent) vscode.postMessage({ type: 'copy', text: efUndo.textContent });
+  if (!efUndo.textContent) return;
+  vscode.postMessage({ type: 'copy', text: efUndo.textContent });
+  flashCopied(efUndoCopy);
 });
+
+const copiedTimers = new WeakMap();
+
+function flashCopied(button) {
+  clearTimeout(copiedTimers.get(button));
+  button.classList.add('copied');
+  copiedTimers.set(button, setTimeout(() => button.classList.remove('copied'), 1200));
+}
+
+const guide = document.getElementById('guide');
+const guideOpen = document.getElementById('guide-open');
+const guideClose = document.getElementById('guide-close');
+let guideReturn = null;
+
+function setGuideOpen(open) {
+  if (open === !guide.hidden) return;
+  if (open) guideReturn = document.activeElement;
+  guide.hidden = !open;
+  if (open) guideClose.focus();
+  else if (guideReturn instanceof HTMLElement && guideReturn.isConnected) guideReturn.focus();
+}
+
+guideOpen.addEventListener('click', () => {
+  setGuideOpen(true);
+});
+
+guideClose.addEventListener('click', () => {
+  setGuideOpen(false);
+});
+
+guide.addEventListener('click', (event) => {
+  if (event.target === guide) setGuideOpen(false);
+});
+
+document.getElementById('guide-keys').addEventListener('click', () => {
+  vscode.postMessage({ type: 'openKeybindings' });
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || guide.hidden) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  setGuideOpen(false);
+}, true);
 
 function isListed(list, value) {
   return [...list.options].some((option) => option.value === value);
